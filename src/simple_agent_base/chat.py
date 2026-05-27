@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 
 from pydantic import BaseModel
 
+from simple_agent_base.transcript import build_transcript, messages_from_items, persist_chat_items
 from simple_agent_base.types import (
     AgentEvent,
     AgentRunResult,
@@ -32,7 +33,7 @@ class ChatSession:
 
     @property
     def history(self) -> list[ChatMessage]:
-        return self._agent._messages_from_items(self._items)
+        return messages_from_items(self._items)
 
     @property
     def items(self) -> list[ConversationItem]:
@@ -58,13 +59,13 @@ class ChatSession:
             system_prompt,
             self._system_prompt,
         )
-        transcript = self._agent._build_transcript(
+        transcript = build_transcript(
             input_data,
             system_prompt=resolved_system_prompt,
             prefix_items=self._items,
         )
         result = await self._agent._run_transcript(transcript, response_model=response_model)
-        self._items = self._agent._persist_chat_items(
+        self._items = persist_chat_items(
             transcript,
             system_prompt=resolved_system_prompt,
         )
@@ -81,7 +82,7 @@ class ChatSession:
             system_prompt,
             self._system_prompt,
         )
-        transcript = self._agent._build_transcript(
+        transcript = build_transcript(
             input_data,
             system_prompt=resolved_system_prompt,
             prefix_items=self._items,
@@ -89,7 +90,7 @@ class ChatSession:
 
         async for event in self._agent._stream_transcript(transcript, response_model=response_model):
             if event.type == "completed":
-                self._items = self._agent._persist_chat_items(
+                self._items = persist_chat_items(
                     transcript,
                     system_prompt=resolved_system_prompt,
                 )

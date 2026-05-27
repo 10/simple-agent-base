@@ -335,14 +335,6 @@ class MCPBridgeManager:
         self._initialized = False
 
 
-def run_approval_handler(
-    approval_handler: ApprovalHandler,
-    request: MCPApprovalRequest,
-) -> bool | Awaitable[bool]:
-    result = approval_handler(request)
-    return result
-
-
 def _empty_parameters_schema() -> JSONObject:
     return {
         "type": "object",

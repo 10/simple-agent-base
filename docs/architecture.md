@@ -48,6 +48,8 @@ Core files:
   Stateful chat sessions and snapshots.
 - [`src/simple_agent_base/config.py`](../src/simple_agent_base/config.py)
   `AgentConfig` and environment-backed settings.
+- [`src/simple_agent_base/transcript.py`](../src/simple_agent_base/transcript.py)
+  Internal transcript normalization, system prompt prepending, and chat-history reconstruction.
 - [`src/simple_agent_base/types.py`](../src/simple_agent_base/types.py)
   Pydantic models, multimodal parts, and tool result types.
 - [`src/simple_agent_base/errors.py`](../src/simple_agent_base/errors.py)
@@ -130,7 +132,7 @@ Example tool output item:
 
 ## Input Normalization
 
-Input normalization lives in `Agent._normalize_input(...)`.
+Input normalization lives in `transcript.normalize_input(...)`.
 
 Rules:
 
@@ -142,12 +144,12 @@ Rules:
 
 Content conversion lives in:
 
-- `_message_to_item(...)`
-- `_content_part_to_item(...)`
+- `message_to_item(...)`
+- `content_part_to_item(...)`
 
 Reconstruction back into `ChatMessage` values lives in:
 
-- `_messages_from_items(...)`
+- `messages_from_items(...)`
 
 That reconstruction is used by `ChatSession.history`.
 
@@ -157,10 +159,10 @@ Convenience system prompts are not a separate provider feature. The package impl
 
 Relevant methods:
 
-- `_clean_system_prompt(...)`
-- `_resolve_system_prompt(...)`
-- `_prepend_system_prompt(...)`
-- `_strip_prepended_system_prompt(...)`
+- `transcript.clean_system_prompt(...)`
+- `Agent._resolve_system_prompt(...)`
+- `transcript.prepend_system_prompt(...)`
+- `transcript.strip_prepended_system_prompt(...)`
 
 Important consequence:
 
@@ -343,7 +345,7 @@ Important behavior:
 
 Persistable items are filtered by:
 
-- `Agent._persistable_items(...)`
+- `transcript.persistable_items(...)`
 
 Current rule:
 

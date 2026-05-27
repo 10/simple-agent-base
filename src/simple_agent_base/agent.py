@@ -26,23 +26,24 @@ from simple_agent_base.mcp import (
     build_mcp_approval_request,
     mcp_result_payload,
     normalize_mcp_tool_result,
-    run_approval_handler,
 )
 from simple_agent_base.providers.base import Provider, ProviderResponse
 from simple_agent_base.providers.openai import OpenAIResponsesProvider
 from simple_agent_base.sync_utils import SyncRuntime, ensure_sync_allowed, run_sync_awaitable
 from simple_agent_base.tools import ToolRegistry
+from simple_agent_base.transcript import (
+    build_transcript,
+    clean_system_prompt,
+    normalize_input,
+    tool_output_item,
+)
 from simple_agent_base.types import (
     AgentEvent,
     AgentRunResult,
-    ChatMessage,
     ChatSnapshot,
     ConversationItem,
-    FilePart,
-    ImagePart,
     MessageInput,
     JSONObject,
-    TextPart,
     ToolCallRequest,
     ToolExecutionResult,
     HostedToolCallUpdate,
@@ -65,6 +66,13 @@ class _PreparedToolCall:
     mcp_tool: MCPToolDefinition | None = None
 
 
+@dataclass(slots=True)
+class _StreamToolExecution:
+    events: list[AgentEvent]
+    denied_call: _ExecutedCall | None = None
+    skip_mcp_approval: bool = False
+
+
 class Agent:
     def __init__(
         self,
@@ -79,7 +87,7 @@ class Agent:
         self.config = config
         self.registry = tools if isinstance(tools, ToolRegistry) else ToolRegistry(tools)
         self.provider = provider or OpenAIResponsesProvider(config)
-        self.system_prompt = self._clean_system_prompt(system_prompt)
+        self.system_prompt = clean_system_prompt(system_prompt)
         self.mcp_servers: list[MCPServer] = list(mcp_servers or [])
         self.hosted_tools: list[JSONObject] = self._validate_hosted_tools(hosted_tools)
         self.approval_handler = approval_handler
@@ -93,7 +101,7 @@ class Agent:
         response_model: type[BaseModel] | None = None,
         system_prompt: str | None = None,
     ) -> AgentRunResult:
-        transcript = self._build_transcript(
+        transcript = build_transcript(
             input_data,
             system_prompt=self._resolve_system_prompt(system_prompt),
         )
@@ -106,7 +114,7 @@ class Agent:
         response_model: type[BaseModel] | None = None,
         system_prompt: str | None = None,
     ) -> AsyncIterator[AgentEvent]:
-        transcript = self._build_transcript(
+        transcript = build_transcript(
             input_data,
             system_prompt=self._resolve_system_prompt(system_prompt),
         )
@@ -121,7 +129,7 @@ class Agent:
     ) -> ChatSession:
         initial_items: list[ConversationItem] = []
         if messages is not None:
-            initial_items = self._normalize_input(messages)
+            initial_items = normalize_input(messages)
         return ChatSession(
             self,
             items=initial_items,
@@ -136,7 +144,7 @@ class Agent:
         return ChatSession(
             self,
             items=validated.items,
-            system_prompt=self._clean_system_prompt(validated.system_prompt),
+            system_prompt=clean_system_prompt(validated.system_prompt),
         )
 
     async def aclose(self) -> None:
@@ -239,7 +247,7 @@ class Agent:
                 tool_results.append(executed.tool_result)
                 if executed.mcp_call is not None:
                     mcp_calls.append(executed.mcp_call)
-                transcript.append(self._tool_output_item(executed.tool_result))
+                transcript.append(tool_output_item(executed.tool_result))
 
         raise MaxTurnsExceededError(
             f"Agent exceeded max_turns={self.config.max_turns} before reaching a final response."
@@ -376,25 +384,21 @@ class Agent:
                 prepared = self._prepare_tool_call_for_stream(call)
                 for event in prepared.events:
                     yield event
-                skip_mcp_approval = False
-                if prepared.mcp_tool is not None:
-                    approved = await self._approve_mcp_call(
-                        self._build_mcp_approval_request(prepared.mcp_tool, call)
-                    )
-                    if not approved:
-                        for event in self._append_executed_call_events(
-                            self._build_denied_mcp_call(prepared.mcp_tool, call),
-                            tool_results=tool_results,
-                            mcp_calls=mcp_calls,
-                            transcript=transcript,
-                        ):
-                            yield event
-                        continue
-                    yield self._build_mcp_started_event(call)
-                    skip_mcp_approval = True
+                execution = await self._resolve_prepared_tool_call_for_stream(call, prepared)
+                for event in execution.events:
+                    yield event
+                if execution.denied_call is not None:
+                    for event in self._append_executed_call_events(
+                        execution.denied_call,
+                        tool_results=tool_results,
+                        mcp_calls=mcp_calls,
+                        transcript=transcript,
+                    ):
+                        yield event
+                    continue
                 pending.append(
                     asyncio.create_task(
-                        self._execute_tool(call, skip_mcp_approval=skip_mcp_approval)
+                        self._execute_tool(call, skip_mcp_approval=execution.skip_mcp_approval)
                     )
                 )
 
@@ -416,23 +420,22 @@ class Agent:
             prepared = self._prepare_tool_call_for_stream(call)
             for event in prepared.events:
                 yield event
-            skip_mcp_approval = False
-            if prepared.mcp_tool is not None:
-                approved = await self._approve_mcp_call(
-                    self._build_mcp_approval_request(prepared.mcp_tool, call)
-                )
-                if not approved:
-                    for event in self._append_executed_call_events(
-                        self._build_denied_mcp_call(prepared.mcp_tool, call),
-                        tool_results=tool_results,
-                        mcp_calls=mcp_calls,
-                        transcript=transcript,
-                    ):
-                        yield event
-                    continue
-                yield self._build_mcp_started_event(call)
-                skip_mcp_approval = True
-            executed = await self._execute_tool(call, skip_mcp_approval=skip_mcp_approval)
+            execution = await self._resolve_prepared_tool_call_for_stream(call, prepared)
+            for event in execution.events:
+                yield event
+            if execution.denied_call is not None:
+                for event in self._append_executed_call_events(
+                    execution.denied_call,
+                    tool_results=tool_results,
+                    mcp_calls=mcp_calls,
+                    transcript=transcript,
+                ):
+                    yield event
+                continue
+            executed = await self._execute_tool(
+                call,
+                skip_mcp_approval=execution.skip_mcp_approval,
+            )
             for event in self._append_executed_call_events(
                 executed,
                 tool_results=tool_results,
@@ -598,6 +601,28 @@ class Agent:
         events.append(self._build_mcp_started_event(call))
         return _PreparedToolCall(events=events)
 
+    async def _resolve_prepared_tool_call_for_stream(
+        self,
+        call: ToolCallRequest,
+        prepared: _PreparedToolCall,
+    ) -> _StreamToolExecution:
+        if prepared.mcp_tool is None:
+            return _StreamToolExecution(events=[])
+
+        approved = await self._approve_mcp_call(
+            self._build_mcp_approval_request(prepared.mcp_tool, call)
+        )
+        if not approved:
+            return _StreamToolExecution(
+                events=[],
+                denied_call=self._build_denied_mcp_call(prepared.mcp_tool, call),
+            )
+
+        return _StreamToolExecution(
+            events=[self._build_mcp_started_event(call)],
+            skip_mcp_approval=True,
+        )
+
     def _build_denied_mcp_call(self, tool: MCPToolDefinition, call: ToolCallRequest) -> _ExecutedCall:
         message = "MCP tool call denied by approval handler."
         return _ExecutedCall(
@@ -632,7 +657,7 @@ class Agent:
                 events.append(AgentEvent(type="mcp_call_completed", mcp_call=executed.mcp_call))
 
         tool_results.append(executed.tool_result)
-        transcript.append(self._tool_output_item(executed.tool_result))
+        transcript.append(tool_output_item(executed.tool_result))
         events.append(AgentEvent(type="tool_call_completed", tool_result=executed.tool_result))
         return events
 
@@ -676,7 +701,7 @@ class Agent:
                 "Set require_approval=False on the MCPServer or pass approval_handler=... to Agent(...)."
             )
 
-        result = run_approval_handler(self.approval_handler, approval)
+        result = self.approval_handler(approval)
         if inspect.isawaitable(result):
             return bool(await result)
         return bool(result)
@@ -706,32 +731,6 @@ class Agent:
             self._sync_runtime = SyncRuntime()
         return self._sync_runtime
 
-    @staticmethod
-    def _user_message(prompt: str) -> ConversationItem:
-        return Agent._message_to_item(ChatMessage(role="user", content=prompt))
-
-    @staticmethod
-    def _tool_output_item(result: ToolExecutionResult) -> ConversationItem:
-        return {
-            "type": "function_call_output",
-            "call_id": result.call_id,
-            "output": result.output,
-        }
-
-    def _normalize_input(self, input_data: str | Sequence[MessageInput]) -> list[ConversationItem]:
-        if isinstance(input_data, str):
-            return [self._user_message(input_data)]
-
-        items: list[ConversationItem] = []
-        for message in input_data:
-            if isinstance(message, str):
-                items.append(self._user_message(message))
-            else:
-                chat_message = ChatMessage.model_validate(message)
-                items.append(self._message_to_item(chat_message))
-
-        return items
-
     def _resolve_system_prompt(self, system_prompt: str | None) -> str | None:
         return self._resolve_system_prompt_with_default(system_prompt, self.system_prompt)
 
@@ -740,164 +739,7 @@ class Agent:
         system_prompt: str | None,
         default: str | None,
     ) -> str | None:
-        cleaned = self._clean_system_prompt(system_prompt)
+        cleaned = clean_system_prompt(system_prompt)
         if cleaned is not None:
             return cleaned
         return default
-
-    def _build_transcript(
-        self,
-        input_data: str | Sequence[MessageInput],
-        *,
-        system_prompt: str | None,
-        prefix_items: Sequence[ConversationItem] | None = None,
-    ) -> list[ConversationItem]:
-        transcript = list(prefix_items or [])
-        transcript.extend(self._normalize_input(input_data))
-        return self._prepend_system_prompt(transcript, system_prompt=system_prompt)
-
-    def _persist_chat_items(
-        self,
-        transcript: Sequence[ConversationItem],
-        *,
-        system_prompt: str | None,
-    ) -> list[ConversationItem]:
-        return self._persistable_items(
-            self._strip_prepended_system_prompt(transcript, system_prompt=system_prompt)
-        )
-
-    @staticmethod
-    def _clean_system_prompt(system_prompt: str | None) -> str | None:
-        if system_prompt is None:
-            return None
-        cleaned = system_prompt.strip()
-        if not cleaned:
-            return None
-        return cleaned
-
-    @classmethod
-    def _prepend_system_prompt(
-        cls,
-        items: list[ConversationItem],
-        *,
-        system_prompt: str | None,
-    ) -> list[ConversationItem]:
-        if system_prompt is None:
-            return list(items)
-
-        return [
-            cls._message_to_item(ChatMessage(role="developer", content=system_prompt)),
-            *items,
-        ]
-
-    @classmethod
-    def _strip_prepended_system_prompt(
-        cls,
-        items: Sequence[ConversationItem],
-        *,
-        system_prompt: str | None,
-    ) -> list[ConversationItem]:
-        if system_prompt is None:
-            return list(items)
-
-        expected_item = cls._message_to_item(ChatMessage(role="developer", content=system_prompt))
-        result = list(items)
-        if result and result[0] == expected_item:
-            return result[1:]
-        return result
-
-    @staticmethod
-    def _persistable_items(items: Sequence[ConversationItem]) -> list[ConversationItem]:
-        return [item for item in items if item.get("type") == "message"]
-
-    @staticmethod
-    def _message_to_item(message: ChatMessage) -> ConversationItem:
-        if isinstance(message.content, str):
-            content: str | list[JSONObject] = message.content
-        else:
-            content = [Agent._content_part_to_item(part) for part in message.content]
-
-        return {
-            "type": "message",
-            "role": message.role,
-            "content": content,
-        }
-
-    @staticmethod
-    def _messages_from_items(items: Sequence[ConversationItem]) -> list[ChatMessage]:
-        messages: list[ChatMessage] = []
-
-        for item in items:
-            if item.get("type") != "message":
-                continue
-
-            role = item.get("role")
-            content_value = item.get("content", [])
-            if not isinstance(role, str):
-                continue
-
-            text_parts: list[str] = []
-            content_parts: list[TextPart | ImagePart | FilePart] = []
-            saw_rich_content = False
-
-            if isinstance(content_value, str):
-                text_parts.append(content_value)
-            elif isinstance(content_value, list):
-                for block in content_value:
-                    if not isinstance(block, dict):
-                        continue
-
-                    block_type = block.get("type")
-                    if block_type in {"input_text", "output_text"}:
-                        text = block.get("text")
-                        if isinstance(text, str):
-                            text_parts.append(text)
-                            content_parts.append(TextPart(text))
-                    elif block_type == "input_image":
-                        image_url = block.get("image_url")
-                        detail = block.get("detail", "auto")
-                        if isinstance(image_url, str) and isinstance(detail, str):
-                            content_parts.append(ImagePart(image_url=image_url, detail=detail))
-                            saw_rich_content = True
-                    elif block_type == "input_file":
-                        file_payload = {
-                            "file_url": block.get("file_url"),
-                            "file_data": block.get("file_data"),
-                            "filename": block.get("filename"),
-                        }
-                        try:
-                            content_parts.append(FilePart.model_validate(file_payload))
-                            saw_rich_content = True
-                        except Exception:
-                            continue
-
-            if saw_rich_content and content_parts:
-                messages.append(ChatMessage(role=role, content=content_parts))
-            elif text_parts:
-                messages.append(ChatMessage(role=role, content="".join(text_parts)))
-
-        return messages
-
-    @staticmethod
-    def _content_part_to_item(part: TextPart | ImagePart | FilePart) -> JSONObject:
-        if isinstance(part, TextPart):
-            return {
-                "type": "input_text",
-                "text": part.text,
-            }
-
-        if isinstance(part, FilePart):
-            item: JSONObject = {"type": "input_file"}
-            if part.file_url is not None:
-                item["file_url"] = part.file_url
-            if part.file_data is not None:
-                item["file_data"] = part.file_data
-            if part.filename is not None:
-                item["filename"] = part.filename
-            return item
-
-        return {
-            "type": "input_image",
-            "image_url": part.image_url,
-            "detail": part.detail,
-        }
