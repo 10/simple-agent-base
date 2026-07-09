@@ -11,13 +11,6 @@ from simple_agent_base.errors import ToolDefinitionError
 from simple_agent_base.types import JSONObject, ToolDefinition
 
 TOOL_DEFINITION_ATTR = "__simple_agent_base_tool_definition__"
-TOOL_METADATA_ATTR = "__simple_agent_base_tool_metadata__"
-
-
-def extract_description(func: Callable[..., object]) -> str:
-    doc = inspect.getdoc(func) or ""
-    first_line = doc.strip().splitlines()[0].strip() if doc.strip() else ""
-    return first_line or f"Run the {func.__name__} tool."
 
 
 def build_arguments_model(func: Callable[..., object]) -> type[BaseModel]:
@@ -45,15 +38,14 @@ def build_arguments_model(func: Callable[..., object]) -> type[BaseModel]:
 
 
 def build_tool_definition(func: Callable[..., object]) -> ToolDefinition:
-    metadata = cast(dict[str, object], getattr(func, TOOL_METADATA_ATTR, {}))
-    description = cast(str, metadata.get("description") or extract_description(func))
-    name = cast(str, metadata.get("name") or func.__name__)
     arguments_model = build_arguments_model(func)
     parameters = cast(JSONObject, arguments_model.model_json_schema())
+    doc = inspect.getdoc(func) or ""
+    first_doc_line = doc.strip().splitlines()[0].strip() if doc.strip() else ""
 
     return ToolDefinition(
-        name=name,
-        description=description,
+        name=func.__name__,
+        description=first_doc_line or f"Run the {func.__name__} tool.",
         parameters=parameters,
         func=func,
         arguments_model=arguments_model,

@@ -5,16 +5,11 @@ import concurrent.futures
 import queue
 import threading
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
-from dataclasses import dataclass
-from typing import Generic, TypeVar
+from contextlib import suppress
+from typing import TypeVar
 
 T = TypeVar("T")
 _SENTINEL = object()
-
-
-@dataclass(slots=True)
-class _IterationError(Generic[T]):
-    error: BaseException
 
 
 def ensure_sync_allowed(api_name: str, async_hint: str) -> None:
@@ -28,13 +23,8 @@ def ensure_sync_allowed(api_name: str, async_hint: str) -> None:
     )
 
 
-def run_sync_awaitable(awaitable: Awaitable[T]) -> T:
-    return asyncio.run(awaitable)
-
-
 class SyncRuntime:
-    def __init__(self, *, thread_name: str = "simple-agent-base-sync-runtime") -> None:
-        self._thread_name = thread_name
+    def __init__(self) -> None:
         self._thread: threading.Thread | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._ready = threading.Event()
@@ -48,7 +38,7 @@ class SyncRuntime:
 
     def iterate(self, async_iterable_factory: Callable[[], AsyncIterator[T]]) -> Iterator[T]:
         loop = self._ensure_started()
-        output_queue: queue.Queue[T | _IterationError[T] | object] = queue.Queue()
+        output_queue: queue.Queue[T | BaseException | object] = queue.Queue()
         stop_requested = threading.Event()
 
         async def consume() -> None:
@@ -59,14 +49,12 @@ class SyncRuntime:
                     if stop_requested.is_set():
                         break
             except BaseException as exc:
-                output_queue.put(_IterationError(exc))
+                output_queue.put(exc)
             finally:
                 aclose = getattr(async_iterable, "aclose", None)
                 if callable(aclose):
-                    try:
+                    with suppress(Exception):
                         await aclose()
-                    except Exception:
-                        pass
                 output_queue.put(_SENTINEL)
 
         future = asyncio.run_coroutine_threadsafe(consume(), loop)
@@ -76,17 +64,15 @@ class SyncRuntime:
                 item = output_queue.get()
                 if item is _SENTINEL:
                     return
-                if isinstance(item, _IterationError):
-                    raise item.error
+                if isinstance(item, BaseException):
+                    raise item
                 yield item
         finally:
             stop_requested.set()
             if not future.done():
                 future.cancel()
-            try:
+            with suppress(concurrent.futures.CancelledError, TimeoutError):
                 future.result(timeout=1.0)
-            except (concurrent.futures.CancelledError, TimeoutError):
-                pass
 
     def close(self) -> None:
         with self._lock:
@@ -110,7 +96,7 @@ class SyncRuntime:
             if self._thread is None:
                 self._thread = threading.Thread(
                     target=self._run_loop,
-                    name=self._thread_name,
+                    name="simple-agent-base-sync-runtime",
                     daemon=True,
                 )
                 self._thread.start()

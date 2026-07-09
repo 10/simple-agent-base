@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import uuid
 from collections.abc import Awaitable, Callable
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
@@ -138,21 +137,6 @@ class MCPToolDefinition:
         }
 
 
-def build_mcp_approval_request(
-    *,
-    request_id: str | None = None,
-    server_name: str,
-    tool_name: str,
-    arguments: JSONObject,
-) -> MCPApprovalRequest:
-    return MCPApprovalRequest(
-        id=request_id or f"mcp-approval-{uuid.uuid4().hex}",
-        server_name=server_name,
-        name=tool_name,
-        arguments=dict(arguments),
-    )
-
-
 def normalize_mcp_tool_result(result: mcp_types.CallToolResult) -> str:
     text_blocks: list[str] = []
     for block in getattr(result, "content", []) or []:
@@ -168,11 +152,7 @@ def normalize_mcp_tool_result(result: mcp_types.CallToolResult) -> str:
     if structured is not None:
         return json.dumps(structured, ensure_ascii=False, default=str)
 
-    return json.dumps(_mcp_result_payload(result), ensure_ascii=False, default=str)
-
-
-def mcp_result_payload(result: mcp_types.CallToolResult) -> object:
-    return _mcp_result_payload(result)
+    return json.dumps(result.model_dump(mode="json", warnings="none"), ensure_ascii=False, default=str)
 
 
 class MCPClientBridge:
@@ -180,33 +160,29 @@ class MCPClientBridge:
         self.server = server
         self._stack: AsyncExitStack | None = None
         self._session: ClientSession | None = None
-        self._tools: dict[str, MCPToolDefinition] | None = None
 
     async def list_tools(self) -> list[MCPToolDefinition]:
         await self._ensure_initialized()
-        if self._tools is None:
-            tools: dict[str, MCPToolDefinition] = {}
-            cursor: str | None = None
-            allowed = None if self.server.allowed_tools is None else set(self.server.allowed_tools)
+        tools: dict[str, MCPToolDefinition] = {}
+        cursor: str | None = None
+        allowed = None if self.server.allowed_tools is None else set(self.server.allowed_tools)
 
-            while True:
-                response = await self._session.list_tools(cursor=cursor)
-                for tool in response.tools:
-                    if allowed is not None and tool.name not in allowed:
-                        continue
-                    definition = self._build_tool_definition(tool)
-                    if definition.namespaced_name in tools:
-                        raise ToolRegistrationError(
-                            f"MCP tool '{definition.namespaced_name}' is already registered."
-                        )
-                    tools[definition.namespaced_name] = definition
-                cursor = response.nextCursor
-                if cursor is None:
-                    break
+        while True:
+            response = await self._session.list_tools(cursor=cursor)
+            for tool in response.tools:
+                if allowed is not None and tool.name not in allowed:
+                    continue
+                definition = self._build_tool_definition(tool)
+                if definition.namespaced_name in tools:
+                    raise ToolRegistrationError(
+                        f"MCP tool '{definition.namespaced_name}' is already registered."
+                    )
+                tools[definition.namespaced_name] = definition
+            cursor = response.nextCursor
+            if cursor is None:
+                break
 
-            self._tools = tools
-
-        return list(self._tools.values())
+        return list(tools.values())
 
     async def call_tool(
         self,
@@ -217,14 +193,6 @@ class MCPClientBridge:
         await self._ensure_initialized()
         return await self._session.call_tool(tool_name, arguments=arguments)
 
-    def get_tool(self, namespaced_name: str) -> MCPToolDefinition:
-        if self._tools is None:
-            raise ToolRegistrationError("MCP tools have not been initialized.")
-        try:
-            return self._tools[namespaced_name]
-        except KeyError as exc:
-            raise ToolRegistrationError(f"MCP tool '{namespaced_name}' is not registered.") from exc
-
     async def close(self) -> None:
         if self._stack is not None:
             try:
@@ -232,7 +200,6 @@ class MCPClientBridge:
             finally:
                 self._stack = None
                 self._session = None
-                self._tools = None
 
     async def _ensure_initialized(self) -> None:
         if self._session is not None:
@@ -268,7 +235,14 @@ class MCPClientBridge:
 
     def _build_tool_definition(self, tool: mcp_types.Tool) -> MCPToolDefinition:
         description = (tool.description or "").strip() or f"Run the {tool.name} tool from {self.server.name}."
-        parameters = dict(tool.inputSchema or _empty_parameters_schema())
+        parameters = dict(
+            tool.inputSchema
+            or {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            }
+        )
         return MCPToolDefinition(
             server_name=self.server.name,
             tool_name=tool.name,
@@ -297,7 +271,7 @@ class MCPBridgeManager:
         for bridge in self._bridges.values():
             for tool in await bridge.list_tools():
                 if tool.namespaced_name in tools_by_name:
-                    raise ToolRegistrationError(f"Tool '{tool.namespaced_name}' is already registered.")
+                    raise ToolRegistrationError(f"MCP tool '{tool.namespaced_name}' is already registered.")
                 tools_by_name[tool.namespaced_name] = (bridge, tool)
 
         self._tools_by_name = tools_by_name
@@ -323,27 +297,12 @@ class MCPBridgeManager:
         *,
         namespaced_name: str,
         arguments: JSONObject,
-    ) -> tuple[MCPToolDefinition, mcp_types.CallToolResult]:
+    ) -> mcp_types.CallToolResult:
         bridge, tool = self._tools_by_name[namespaced_name]
-        result = await bridge.call_tool(tool_name=tool.tool_name, arguments=arguments)
-        return tool, result
+        return await bridge.call_tool(tool_name=tool.tool_name, arguments=arguments)
 
     async def close(self) -> None:
         for bridge in self._bridges.values():
             await bridge.close()
         self._tools_by_name = {}
         self._initialized = False
-
-
-def _empty_parameters_schema() -> JSONObject:
-    return {
-        "type": "object",
-        "properties": {},
-        "additionalProperties": False,
-    }
-
-
-def _mcp_result_payload(result: mcp_types.CallToolResult) -> object:
-    if hasattr(result, "model_dump"):
-        return result.model_dump(mode="json", warnings="none")
-    return result

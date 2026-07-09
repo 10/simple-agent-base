@@ -21,7 +21,6 @@ class ToolDefinition:
     func: Callable[..., object] = field(repr=False)
     arguments_model: type[BaseModel] = field(repr=False)
     is_async: bool = False
-    strict: bool = True
 
 
 class ToolCallRequest(BaseModel):
@@ -60,14 +59,6 @@ SUPPORTED_DOCUMENT_FILE_MIME_TYPES = {
     "application/xml",
     "application/yaml",
     "message/rfc822",
-    "text/calendar",
-    "text/csv",
-    "text/html",
-    "text/markdown",
-    "text/plain",
-    "text/rtf",
-    "text/tab-separated-values",
-    "text/xml",
 }
 
 FALLBACK_DOCUMENT_FILE_MIME_TYPES = {
@@ -120,8 +111,6 @@ class TextPart(BaseModel):
     def __init__(self, text: str | None = None, **data: object) -> None:
         if text is not None and "text" not in data:
             data["text"] = text
-        if "type" not in data:
-            data["type"] = "text"
         super().__init__(**data)
 
 
@@ -178,8 +167,7 @@ class FilePart(BaseModel):
 
     @model_validator(mode="after")
     def validate_source(self) -> FilePart:
-        provided = [value for value in (self.file_url, self.file_data) if value is not None]
-        if len(provided) != 1:
+        if (self.file_url is None) == (self.file_data is None):
             raise ValueError("FilePart requires exactly one of file_url or file_data.")
 
         if self.file_data is not None and not self.filename:

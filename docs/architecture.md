@@ -161,8 +161,8 @@ Relevant methods:
 
 - `transcript.clean_system_prompt(...)`
 - `Agent._resolve_system_prompt(...)`
-- `transcript.prepend_system_prompt(...)`
-- `transcript.strip_prepended_system_prompt(...)`
+- `transcript.build_transcript(...)`
+- `transcript.persist_chat_items(...)`
 
 Important consequence:
 
@@ -343,10 +343,6 @@ Important behavior:
 - `run(...)` and `stream(...)` create a transcript from stored items plus new input
 - after a successful turn, the chat stores only persistable message items
 
-Persistable items are filtered by:
-
-- `transcript.persistable_items(...)`
-
 Current rule:
 
 - only items with `type == "message"` are stored in chat state
@@ -370,7 +366,6 @@ Sync wrappers are implemented in [`sync_utils.py`](../src/simple_agent_base/sync
 Core components:
 
 - `ensure_sync_allowed(...)`
-- `run_sync_awaitable(...)`
 - `SyncRuntime`
 
 `SyncRuntime` owns:

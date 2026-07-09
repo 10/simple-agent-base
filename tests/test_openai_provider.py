@@ -61,10 +61,7 @@ class FakeStream:
     async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
         return None
 
-    def __aiter__(self) -> AsyncIterator[object]:
-        return self._iterate()
-
-    async def _iterate(self) -> AsyncIterator[object]:
+    async def __aiter__(self) -> AsyncIterator[object]:
         for event in self._events:
             yield event
 
@@ -72,22 +69,19 @@ class FakeStream:
         return self._final_response
 
 
-class FakeResponsesAPI:
-    def __init__(self, stream: FakeStream | None = None) -> None:
-        self._stream = stream
-
-    def stream(self, **_: Any) -> FakeStream:
-        if self._stream is None:
+def fake_client(stream: FakeStream | None = None) -> SimpleNamespace:
+    def stream_response(**_: Any) -> FakeStream:
+        if stream is None:
             raise AssertionError("No fake stream configured.")
-        return self._stream
+        return stream
 
-
-class FakeClient:
-    def __init__(self, stream: FakeStream | None = None) -> None:
-        self.responses = FakeResponsesAPI(stream=stream)
-
-    async def close(self) -> None:
+    async def close() -> None:
         return None
+
+    return SimpleNamespace(
+        responses=SimpleNamespace(stream=stream_response),
+        close=close,
+    )
 
 
 REASONING_SUMMARY = "Checked the constraint."
@@ -225,7 +219,7 @@ def test_convert_response_tolerates_partial_or_provider_specific_usage() -> None
 async def test_stream_response_emits_reasoning_delta_and_completed_summary() -> None:
     provider = make_provider(reasoning_effort="high")
     final_response = make_reasoning_response()
-    provider._client = FakeClient(
+    provider._client = fake_client(
         stream=FakeStream(
             events=[
                 SimpleNamespace(type="response.reasoning_summary_text.delta", delta="Checked ", item_id="rs_1", summary_index=0),
@@ -255,7 +249,7 @@ async def test_stream_response_emits_tool_arguments_delta_events() -> None:
             FakeOutputTextItem(content=[{"type": "output_text", "text": ""}]),
         ],
     )
-    provider._client = FakeClient(
+    provider._client = fake_client(
         stream=FakeStream(
             events=[
                 SimpleNamespace(
@@ -299,7 +293,7 @@ async def test_stream_response_emits_web_search_call_events() -> None:
             FakeOutputTextItem(content=[{"type": "output_text", "text": "done"}]),
         ],
     )
-    provider._client = FakeClient(
+    provider._client = fake_client(
         stream=FakeStream(
             events=[
                 SimpleNamespace(
@@ -386,7 +380,7 @@ async def test_stream_response_emits_generic_hosted_tool_events_for_file_search(
             FakeOutputTextItem(content=[{"type": "output_text", "text": "done"}]),
         ],
     )
-    provider._client = FakeClient(
+    provider._client = fake_client(
         stream=FakeStream(
             events=[
                 SimpleNamespace(
@@ -459,7 +453,7 @@ async def test_stream_response_emits_generic_hosted_tool_events_for_code_interpr
             FakeOutputTextItem(content=[{"type": "output_text", "text": "done"}]),
         ],
     )
-    provider._client = FakeClient(
+    provider._client = fake_client(
         stream=FakeStream(
             events=[
                 SimpleNamespace(
@@ -531,7 +525,7 @@ async def test_stream_response_uses_done_fallback_when_no_reasoning_delta_is_see
         output_text="reasoning-ok",
         output=[FakeOutputTextItem(content=[{"type": "output_text", "text": "reasoning-ok"}])],
     )
-    provider._client = FakeClient(
+    provider._client = fake_client(
         stream=FakeStream(
             events=[
                 SimpleNamespace(

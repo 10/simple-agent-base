@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator, Sequence
-from dataclasses import dataclass, field
-from io import StringIO
 from typing import cast
 
 from pydantic import BaseModel
@@ -24,35 +22,6 @@ from .base import (
 )
 
 
-@dataclass(slots=True)
-class _ReasoningSummaryAccumulator:
-    buffer: StringIO = field(default_factory=StringIO)
-    seen_keys: set[tuple[str | None, int | None]] = field(default_factory=set)
-
-    def add_delta(self, event: object) -> str:
-        self.seen_keys.add(self._key_for(event))
-        delta = getattr(event, "delta", "")
-        if delta:
-            self.buffer.write(delta)
-        return delta
-
-    def add_done_fallback(self, event: object) -> None:
-        if self._key_for(event) in self.seen_keys:
-            return
-
-        text = getattr(event, "text", "")
-        if text:
-            self.buffer.write(text)
-
-    def build(self) -> str | None:
-        summary = self.buffer.getvalue().strip()
-        return summary or None
-
-    @staticmethod
-    def _key_for(event: object) -> tuple[str | None, int | None]:
-        return (getattr(event, "item_id", None), getattr(event, "summary_index", None))
-
-
 class OpenAIResponsesProvider:
     def __init__(self, config: AgentConfig) -> None:
         self._config = config
@@ -71,12 +40,11 @@ class OpenAIResponsesProvider:
         response_model: type[BaseModel] | None = None,
     ) -> ProviderResponse:
         try:
+            kwargs = self._request_kwargs(input_items, tools, response_model=response_model)
             if response_model is None:
-                response = await self._client.responses.create(**self._request_kwargs(input_items, tools))
+                response = await self._client.responses.create(**kwargs)
             else:
-                response = await self._client.responses.parse(
-                    **self._request_kwargs(input_items, tools, response_model=response_model)
-                )
+                response = await self._client.responses.parse(**kwargs)
         except Exception as exc:
             raise ProviderError(f"OpenAI response request failed: {exc}") from exc
 
@@ -89,9 +57,9 @@ class OpenAIResponsesProvider:
         tools: Sequence[JSONObject],
         response_model: type[BaseModel] | None = None,
     ) -> AsyncIterator[ProviderEvent]:
-        reasoning_summary = _ReasoningSummaryAccumulator()
+        reasoning_parts: list[str] = []
+        seen_reasoning_keys: set[tuple[str | None, int | None]] = set()
         function_call_meta: dict[str, tuple[str | None, str | None]] = {}
-        hosted_tool_meta: dict[str, str] = {}
         hosted_tool_statuses: dict[str, str] = {}
 
         try:
@@ -102,9 +70,18 @@ class OpenAIResponsesProvider:
                     if event.type == "response.output_text.delta":
                         yield ProviderTextDeltaEvent(delta=event.delta)
                     elif event.type == "response.reasoning_summary_text.delta":
-                        yield ProviderReasoningDeltaEvent(delta=reasoning_summary.add_delta(event))
+                        seen_reasoning_keys.add(
+                            (getattr(event, "item_id", None), getattr(event, "summary_index", None))
+                        )
+                        delta = getattr(event, "delta", "")
+                        if delta:
+                            reasoning_parts.append(delta)
+                        yield ProviderReasoningDeltaEvent(delta=delta)
                     elif event.type == "response.reasoning_summary_text.done":
-                        reasoning_summary.add_done_fallback(event)
+                        key = (getattr(event, "item_id", None), getattr(event, "summary_index", None))
+                        text = getattr(event, "text", "")
+                        if key not in seen_reasoning_keys and text:
+                            reasoning_parts.append(text)
                     elif event.type == "response.output_item.added":
                         item = getattr(event, "item", None)
                         if getattr(item, "type", None) == "function_call":
@@ -112,11 +89,13 @@ class OpenAIResponsesProvider:
                                 getattr(item, "call_id", None),
                                 getattr(item, "name", None),
                             )
-                        elif (hosted_event := self._hosted_tool_event_from_output_item_added(
+                        elif (hosted_event := self._hosted_tool_event_from_output_item(
                             item,
+                            event_type="hosted_tool_call_started",
+                            default_status="in_progress",
+                            skip_duplicate=True,
                             output_index=getattr(event, "output_index", None),
                             sequence_number=getattr(event, "sequence_number", None),
-                            hosted_tool_meta=hosted_tool_meta,
                             hosted_tool_statuses=hosted_tool_statuses,
                         )) is not None:
                             yield hosted_event
@@ -130,17 +109,18 @@ class OpenAIResponsesProvider:
                         )
                     elif event.type == "response.output_item.done":
                         item = getattr(event, "item", None)
-                        if (hosted_event := self._hosted_tool_event_from_output_item_done(
+                        if (hosted_event := self._hosted_tool_event_from_output_item(
                             item,
+                            event_type="hosted_tool_call_completed",
+                            default_status="completed",
+                            skip_duplicate=False,
                             output_index=getattr(event, "output_index", None),
                             sequence_number=getattr(event, "sequence_number", None),
-                            hosted_tool_meta=hosted_tool_meta,
                             hosted_tool_statuses=hosted_tool_statuses,
                         )) is not None:
                             yield hosted_event
                     elif (hosted_event := self._hosted_tool_event_from_stream_event(
                         event,
-                        hosted_tool_meta=hosted_tool_meta,
                         hosted_tool_statuses=hosted_tool_statuses,
                     )) is not None:
                         yield hosted_event
@@ -151,7 +131,8 @@ class OpenAIResponsesProvider:
 
         response = self._convert_response(final_response)
         if response.reasoning_summary is None:
-            response.reasoning_summary = reasoning_summary.build()
+            summary = "".join(reasoning_parts).strip()
+            response.reasoning_summary = summary or None
         yield ProviderCompletedEvent(response=response)
 
     async def close(self) -> None:
@@ -234,12 +215,21 @@ class OpenAIResponsesProvider:
             return None
 
         raw_usage = self._to_dict(usage)
+        input_tokens = raw_usage.get("input_tokens")
+        output_tokens = raw_usage.get("output_tokens")
+        total_tokens = raw_usage.get("total_tokens")
+        input_tokens_details = raw_usage.get("input_tokens_details")
+        output_tokens_details = raw_usage.get("output_tokens_details")
         return UsageMetadata(
-            input_tokens=self._optional_int(raw_usage.get("input_tokens")),
-            output_tokens=self._optional_int(raw_usage.get("output_tokens")),
-            total_tokens=self._optional_int(raw_usage.get("total_tokens")),
-            input_tokens_details=self._optional_object(raw_usage.get("input_tokens_details")),
-            output_tokens_details=self._optional_object(raw_usage.get("output_tokens_details")),
+            input_tokens=input_tokens if isinstance(input_tokens, int) else None,
+            output_tokens=output_tokens if isinstance(output_tokens, int) else None,
+            total_tokens=total_tokens if isinstance(total_tokens, int) else None,
+            input_tokens_details=cast(JSONObject, input_tokens_details)
+            if isinstance(input_tokens_details, dict)
+            else None,
+            output_tokens_details=cast(JSONObject, output_tokens_details)
+            if isinstance(output_tokens_details, dict)
+            else None,
             raw=raw_usage,
         )
 
@@ -254,29 +244,15 @@ class OpenAIResponsesProvider:
 
     @staticmethod
     def _join_non_empty_texts(parts: Sequence[object], *, separator: str = "") -> str | None:
-        cleaned_parts: list[str] = []
-        for part in parts:
-            text = getattr(part, "text", part)
-            if not isinstance(text, str):
-                continue
-
-            stripped = text.strip()
-            if stripped:
-                cleaned_parts.append(stripped)
-
+        cleaned_parts = [
+            stripped
+            for part in parts
+            if isinstance((text := getattr(part, "text", part)), str)
+            if (stripped := text.strip())
+        ]
         if not cleaned_parts:
             return None
-
-        summary = separator.join(cleaned_parts).strip()
-        return summary or None
-
-    @staticmethod
-    def _optional_int(value: object) -> int | None:
-        return value if isinstance(value, int) else None
-
-    @staticmethod
-    def _optional_object(value: object) -> JSONObject | None:
-        return cast(JSONObject, value) if isinstance(value, dict) else None
+        return separator.join(cleaned_parts)
 
     @staticmethod
     def _to_dict(value: object) -> JSONObject:
@@ -303,13 +279,15 @@ class OpenAIResponsesProvider:
         )
 
     @classmethod
-    def _hosted_tool_event_from_output_item_added(
+    def _hosted_tool_event_from_output_item(
         cls,
         item: object,
         *,
+        event_type: str,
+        default_status: str,
+        skip_duplicate: bool,
         output_index: object,
         sequence_number: object,
-        hosted_tool_meta: dict[str, str],
         hosted_tool_statuses: dict[str, str],
     ) -> ProviderHostedToolCallEvent | None:
         item_type = getattr(item, "type", None)
@@ -317,47 +295,15 @@ class OpenAIResponsesProvider:
         if not cls._is_hosted_tool_output_type(item_type) or not isinstance(item_id, str):
             return None
 
-        hosted_tool_meta[item_id] = item_type
-        status = getattr(item, "status", "in_progress")
+        status = getattr(item, "status", default_status)
         if not isinstance(status, str):
-            status = "in_progress"
-        if hosted_tool_statuses.get(item_id) == status:
+            status = default_status
+        if skip_duplicate and hosted_tool_statuses.get(item_id) == status:
             return None
 
         hosted_tool_statuses[item_id] = status
         return ProviderHostedToolCallEvent(
-            type="hosted_tool_call_started",
-            item_id=item_id,
-            tool_type=item_type,
-            status=status,
-            output_index=output_index if isinstance(output_index, int) else None,
-            sequence_number=sequence_number if isinstance(sequence_number, int) else None,
-            item=cls._to_dict(item),
-        )
-
-    @classmethod
-    def _hosted_tool_event_from_output_item_done(
-        cls,
-        item: object,
-        *,
-        output_index: object,
-        sequence_number: object,
-        hosted_tool_meta: dict[str, str],
-        hosted_tool_statuses: dict[str, str],
-    ) -> ProviderHostedToolCallEvent | None:
-        item_type = getattr(item, "type", None)
-        item_id = getattr(item, "id", None)
-        if not cls._is_hosted_tool_output_type(item_type) or not isinstance(item_id, str):
-            return None
-
-        hosted_tool_meta[item_id] = item_type
-        status = getattr(item, "status", "completed")
-        if not isinstance(status, str):
-            status = "completed"
-
-        hosted_tool_statuses[item_id] = status
-        return ProviderHostedToolCallEvent(
-            type="hosted_tool_call_completed",
+            type=event_type,
             item_id=item_id,
             tool_type=item_type,
             status=status,
@@ -371,7 +317,6 @@ class OpenAIResponsesProvider:
         cls,
         event: object,
         *,
-        hosted_tool_meta: dict[str, str],
         hosted_tool_statuses: dict[str, str],
     ) -> ProviderHostedToolCallEvent | None:
         event_type = getattr(event, "type", None)
@@ -383,7 +328,6 @@ class OpenAIResponsesProvider:
         if tool_type is None or status is None or not isinstance(item_id, str):
             return None
 
-        hosted_tool_meta[item_id] = tool_type
         if status == "completed":
             hosted_tool_statuses[item_id] = status
             return None
@@ -409,24 +353,14 @@ class OpenAIResponsesProvider:
 
     @staticmethod
     def _parse_hosted_tool_stream_event(event_type: str) -> tuple[str | None, str | None]:
-        if not event_type.startswith("response."):
-            return (None, None)
-
-        event_name = event_type[len("response.") :]
-        prefix_to_tool = {
-            "web_search_call.": "web_search_call",
-            "file_search_call.": "file_search_call",
-            "image_generation_call.": "image_generation_call",
-            "code_interpreter_call.": "code_interpreter_call",
+        tool_name, _, suffix = event_type.removeprefix("response.").rpartition(".")
+        tool_types = {
+            "web_search_call",
+            "file_search_call",
+            "image_generation_call",
+            "code_interpreter_call",
         }
-        for prefix, tool_type in prefix_to_tool.items():
-            if not event_name.startswith(prefix):
-                continue
-
-            suffix = event_name[len(prefix) :]
-            allowed_statuses = {"in_progress", "searching", "generating", "interpreting", "completed"}
-            if suffix in allowed_statuses:
-                return (tool_type, suffix)
-            return (None, None)
-
+        allowed_statuses = {"in_progress", "searching", "generating", "interpreting", "completed"}
+        if tool_name in tool_types and suffix in allowed_statuses:
+            return (tool_name, suffix)
         return (None, None)

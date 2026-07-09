@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator
 from typing import Any
 
 import pytest
 from pydantic import BaseModel
 
+from conftest import FakeProvider
 from simple_agent_base import Agent, AgentConfig, ChatMessage, ChatSnapshot, UsageMetadata, tool
 from simple_agent_base.errors import ToolExecutionError
 from simple_agent_base.providers.base import (
@@ -18,52 +19,10 @@ from simple_agent_base.providers.base import (
     ProviderTextDeltaEvent,
     ProviderToolArgumentsDeltaEvent,
 )
-from simple_agent_base.types import ConversationItem
 
 
-class FakeStreamingProvider:
-    def __init__(self, event_sequences: list[list[ProviderEvent]]) -> None:
-        self.event_sequences = list(event_sequences)
-        self.calls: list[dict[str, Any]] = []
-
-    async def create_response(
-        self,
-        *,
-        input_items: Sequence[ConversationItem],
-        tools: Sequence[dict[str, Any]],
-        response_model: type[BaseModel] | None = None,
-    ) -> ProviderResponse:
-        raise NotImplementedError
-
-    async def stream_response(
-        self,
-        *,
-        input_items: Sequence[ConversationItem],
-        tools: Sequence[dict[str, Any]],
-        response_model: type[BaseModel] | None = None,
-    ) -> AsyncIterator[ProviderEvent]:
-        self.calls.append(
-            {
-                "input_items": list(input_items),
-                "tools": list(tools),
-                "response_model": response_model,
-            }
-        )
-        for event in self.event_sequences.pop(0):
-            yield event
-
-    async def close(self) -> None:
-        return None
-
-
-class ExplodingStreamingProvider(FakeStreamingProvider):
-    async def stream_response(
-        self,
-        *,
-        input_items: Sequence[ConversationItem],
-        tools: Sequence[dict[str, Any]],
-        response_model: type[BaseModel] | None = None,
-    ) -> AsyncIterator[ProviderEvent]:
+class ExplodingStreamingProvider(FakeProvider):
+    async def stream_response(self, **_kwargs: Any) -> AsyncIterator[ProviderEvent]:
         raise RuntimeError("stream failed")
         yield
 
@@ -108,11 +67,8 @@ def make_reasoning_stream(provider_summary: str = REASONING_SUMMARY) -> list[Pro
         ProviderReasoningDeltaEvent(delta=provider_summary),
         ProviderCompletedEvent(
             response=ProviderResponse(
-                response_id="resp_1",
                 output_text="reasoning-ok",
                 reasoning_summary=provider_summary,
-                output_items=[],
-                raw_response={"id": "resp_1"},
             )
         ),
     ]
@@ -120,17 +76,14 @@ def make_reasoning_stream(provider_summary: str = REASONING_SUMMARY) -> list[Pro
 
 @pytest.mark.asyncio
 async def test_stream_yields_text_delta_events() -> None:
-    provider = FakeStreamingProvider(
+    provider = FakeProvider(stream_sequences=
         [
             [
                 ProviderTextDeltaEvent(delta="Hel"),
                 ProviderTextDeltaEvent(delta="lo"),
                 ProviderCompletedEvent(
                     response=ProviderResponse(
-                        response_id="resp_1",
                         output_text="Hello",
-                        output_items=[],
-                        raw_response={"id": "resp_1"},
                     )
                 ),
             ]
@@ -145,7 +98,7 @@ async def test_stream_yields_text_delta_events() -> None:
 
 @pytest.mark.asyncio
 async def test_stream_yields_reasoning_delta_events() -> None:
-    provider = FakeStreamingProvider([make_reasoning_stream()])
+    provider = FakeProvider(stream_sequences=[make_reasoning_stream()])
     agent = Agent(config=AgentConfig(model="gpt-5"), provider=provider)
 
     events = [event async for event in agent.stream(REASONING_PROMPT)]
@@ -154,17 +107,14 @@ async def test_stream_yields_reasoning_delta_events() -> None:
 
 
 def test_stream_sync_yields_text_delta_and_completed_events() -> None:
-    provider = FakeStreamingProvider(
+    provider = FakeProvider(stream_sequences=
         [
             [
                 ProviderTextDeltaEvent(delta="Hel"),
                 ProviderTextDeltaEvent(delta="lo"),
                 ProviderCompletedEvent(
                     response=ProviderResponse(
-                        response_id="resp_1",
                         output_text="Hello",
-                        output_items=[],
-                        raw_response={"id": "resp_1"},
                     )
                 ),
             ]
@@ -181,7 +131,7 @@ def test_stream_sync_yields_text_delta_and_completed_events() -> None:
 
 
 def test_stream_sync_yields_reasoning_delta_events() -> None:
-    provider = FakeStreamingProvider([make_reasoning_stream()])
+    provider = FakeProvider(stream_sequences=[make_reasoning_stream()])
     agent = Agent(config=AgentConfig(model="gpt-5"), provider=provider)
 
     events = list(agent.stream_sync(REASONING_PROMPT))
@@ -191,7 +141,7 @@ def test_stream_sync_yields_reasoning_delta_events() -> None:
 
 @pytest.mark.asyncio
 async def test_stream_sync_raises_inside_running_event_loop() -> None:
-    agent = Agent(config=AgentConfig(model="gpt-5"), provider=FakeStreamingProvider([]))
+    agent = Agent(config=AgentConfig(model="gpt-5"), provider=FakeProvider(stream_sequences=[]))
 
     with pytest.raises(RuntimeError, match="stream_sync\\(\\) cannot be used inside a running event loop"):
         list(agent.stream_sync("Say hello."))
@@ -199,16 +149,13 @@ async def test_stream_sync_raises_inside_running_event_loop() -> None:
 
 @pytest.mark.asyncio
 async def test_stream_prepends_run_level_system_prompt() -> None:
-    provider = FakeStreamingProvider(
+    provider = FakeProvider(stream_sequences=
         [
             [
                 ProviderTextDeltaEvent(delta="Hello"),
                 ProviderCompletedEvent(
                     response=ProviderResponse(
-                        response_id="resp_1",
                         output_text="Hello",
-                        output_items=[],
-                        raw_response={"id": "resp_1"},
                     )
                 ),
             ]
@@ -234,7 +181,7 @@ async def test_stream_prepends_run_level_system_prompt() -> None:
 
 @pytest.mark.asyncio
 async def test_stream_completed_result_includes_reasoning_summary() -> None:
-    provider = FakeStreamingProvider([make_reasoning_stream()])
+    provider = FakeProvider(stream_sequences=[make_reasoning_stream()])
     agent = Agent(config=AgentConfig(model="gpt-5"), provider=provider)
 
     events = [event async for event in agent.stream(REASONING_PROMPT)]
@@ -246,16 +193,13 @@ async def test_stream_completed_result_includes_reasoning_summary() -> None:
 
 @pytest.mark.asyncio
 async def test_stream_completed_result_includes_aggregated_usage() -> None:
-    provider = FakeStreamingProvider(
+    provider = FakeProvider(stream_sequences=
         [
             [
                 ProviderCompletedEvent(
                     response=ProviderResponse(
-                        response_id="resp_1",
                         output_text="Hello",
-                        output_items=[],
                         usage=UsageMetadata(input_tokens=5, output_tokens=2, total_tokens=7),
-                        raw_response={"id": "resp_1"},
                     )
                 ),
             ]
@@ -279,12 +223,11 @@ async def test_stream_completed_result_includes_aggregated_usage() -> None:
 
 @pytest.mark.asyncio
 async def test_stream_aggregates_usage_after_tool_turn() -> None:
-    provider = FakeStreamingProvider(
+    provider = FakeProvider(stream_sequences=
         [
             [
                 ProviderCompletedEvent(
                     response=ProviderResponse(
-                        response_id="resp_1",
                         tool_calls=[
                             {
                                 "call_id": "call_1",
@@ -293,20 +236,15 @@ async def test_stream_aggregates_usage_after_tool_turn() -> None:
                                 "raw_arguments": '{"message":"hello"}',
                             }
                         ],
-                        output_items=[],
                         usage=UsageMetadata(input_tokens=9, output_tokens=3, total_tokens=12),
-                        raw_response={"id": "resp_1"},
                     )
                 )
             ],
             [
                 ProviderCompletedEvent(
                     response=ProviderResponse(
-                        response_id="resp_2",
                         output_text="Done",
-                        output_items=[],
                         usage=UsageMetadata(input_tokens=7, output_tokens=4, total_tokens=11),
-                        raw_response={"id": "resp_2"},
                     )
                 )
             ],
@@ -327,12 +265,11 @@ async def test_stream_aggregates_usage_after_tool_turn() -> None:
 
 @pytest.mark.asyncio
 async def test_stream_yields_tool_lifecycle_and_completed_events() -> None:
-    provider = FakeStreamingProvider(
+    provider = FakeProvider(stream_sequences=
         [
             [
                 ProviderCompletedEvent(
                     response=ProviderResponse(
-                        response_id="resp_1",
                         tool_calls=[
                             {
                                 "call_id": "call_1",
@@ -349,7 +286,6 @@ async def test_stream_yields_tool_lifecycle_and_completed_events() -> None:
                                 "arguments": '{"message":"hello"}',
                             }
                         ],
-                        raw_response={"id": "resp_1"},
                     )
                 )
             ],
@@ -357,10 +293,7 @@ async def test_stream_yields_tool_lifecycle_and_completed_events() -> None:
                 ProviderTextDeltaEvent(delta="Done"),
                 ProviderCompletedEvent(
                     response=ProviderResponse(
-                        response_id="resp_2",
                         output_text="Done",
-                        output_items=[],
-                        raw_response={"id": "resp_2"},
                     )
                 ),
             ],
@@ -384,7 +317,7 @@ async def test_stream_yields_tool_lifecycle_and_completed_events() -> None:
 
 @pytest.mark.asyncio
 async def test_stream_yields_tool_arguments_delta_before_tool_lifecycle() -> None:
-    provider = FakeStreamingProvider(
+    provider = FakeProvider(stream_sequences=
         [
             [
                 ProviderToolArgumentsDeltaEvent(
@@ -401,7 +334,6 @@ async def test_stream_yields_tool_arguments_delta_before_tool_lifecycle() -> Non
                 ),
                 ProviderCompletedEvent(
                     response=ProviderResponse(
-                        response_id="resp_1",
                         tool_calls=[
                             {
                                 "call_id": "call_1",
@@ -418,17 +350,13 @@ async def test_stream_yields_tool_arguments_delta_before_tool_lifecycle() -> Non
                                 "arguments": '{"message":"hello"}',
                             }
                         ],
-                        raw_response={"id": "resp_1"},
                     )
                 ),
             ],
             [
                 ProviderCompletedEvent(
                     response=ProviderResponse(
-                        response_id="resp_2",
                         output_text="Done",
-                        output_items=[],
-                        raw_response={"id": "resp_2"},
                     )
                 ),
             ],
@@ -454,7 +382,7 @@ async def test_stream_yields_tool_arguments_delta_before_tool_lifecycle() -> Non
 
 @pytest.mark.asyncio
 async def test_stream_yields_web_search_call_events() -> None:
-    provider = FakeStreamingProvider(
+    provider = FakeProvider(stream_sequences=
         [
             [
                 ProviderHostedToolCallEvent(
@@ -491,7 +419,6 @@ async def test_stream_yields_web_search_call_events() -> None:
                 ),
                 ProviderCompletedEvent(
                     response=ProviderResponse(
-                        response_id="resp_1",
                         output_text="Done",
                         output_items=[
                             {
@@ -500,7 +427,6 @@ async def test_stream_yields_web_search_call_events() -> None:
                                 "status": "completed",
                             }
                         ],
-                        raw_response={"id": "resp_1"},
                     )
                 ),
             ]
@@ -558,12 +484,11 @@ async def test_stream_yields_web_search_call_events() -> None:
 
 @pytest.mark.asyncio
 async def test_stream_tool_timeout_raises_after_started_event() -> None:
-    provider = FakeStreamingProvider(
+    provider = FakeProvider(stream_sequences=
         [
             [
                 ProviderCompletedEvent(
                     response=ProviderResponse(
-                        response_id="resp_1",
                         tool_calls=[
                             {
                                 "call_id": "call_1",
@@ -572,8 +497,6 @@ async def test_stream_tool_timeout_raises_after_started_event() -> None:
                                 "raw_arguments": '{"message":"hello"}',
                             }
                         ],
-                        output_items=[],
-                        raw_response={"id": "resp_1"},
                     )
                 )
             ]
@@ -597,12 +520,11 @@ async def test_stream_tool_timeout_raises_after_started_event() -> None:
 
 
 def test_stream_sync_preserves_tool_lifecycle_events() -> None:
-    provider = FakeStreamingProvider(
+    provider = FakeProvider(stream_sequences=
         [
             [
                 ProviderCompletedEvent(
                     response=ProviderResponse(
-                        response_id="resp_1",
                         tool_calls=[
                             {
                                 "call_id": "call_1",
@@ -611,18 +533,13 @@ def test_stream_sync_preserves_tool_lifecycle_events() -> None:
                                 "raw_arguments": '{"message":"hello"}',
                             }
                         ],
-                        output_items=[],
-                        raw_response={"id": "resp_1"},
                     )
                 )
             ],
             [
                 ProviderCompletedEvent(
                     response=ProviderResponse(
-                        response_id="resp_2",
                         output_text="Done",
-                        output_items=[],
-                        raw_response={"id": "resp_2"},
                     )
                 )
             ],
@@ -642,12 +559,11 @@ def test_stream_sync_preserves_tool_lifecycle_events() -> None:
 
 
 def test_stream_sync_tool_timeout_raises() -> None:
-    provider = FakeStreamingProvider(
+    provider = FakeProvider(stream_sequences=
         [
             [
                 ProviderCompletedEvent(
                     response=ProviderResponse(
-                        response_id="resp_1",
                         tool_calls=[
                             {
                                 "call_id": "call_1",
@@ -656,8 +572,6 @@ def test_stream_sync_tool_timeout_raises() -> None:
                                 "raw_arguments": '{"message":"hello"}',
                             }
                         ],
-                        output_items=[],
-                        raw_response={"id": "resp_1"},
                     )
                 )
             ]
@@ -680,29 +594,21 @@ def test_stream_sync_after_run_sync_reuses_the_same_agent_cleanly() -> None:
     class CombinedProvider:
         def __init__(self) -> None:
             self.create_calls: list[dict[str, Any]] = []
-            self.stream_calls: list[dict[str, Any]] = []
 
         async def create_response(self, **kwargs: Any) -> ProviderResponse:
             self.create_calls.append(kwargs)
             return ProviderResponse(
-                response_id="resp_1",
                 output_text="hello world",
-                output_items=[],
-                raw_response={"id": "resp_1"},
             )
 
         async def stream_response(
             self, **kwargs: Any
         ) -> AsyncIterator[ProviderEvent]:
-            self.stream_calls.append(kwargs)
             yield ProviderTextDeltaEvent(delta="Hel")
             yield ProviderTextDeltaEvent(delta="lo")
             yield ProviderCompletedEvent(
                 response=ProviderResponse(
-                    response_id="resp_2",
                     output_text="Hello",
-                    output_items=[],
-                    raw_response={"id": "resp_2"},
                 )
             )
 
@@ -721,12 +627,11 @@ def test_stream_sync_after_run_sync_reuses_the_same_agent_cleanly() -> None:
 
 @pytest.mark.asyncio
 async def test_stream_parallel_batch_emits_deterministic_lifecycle_events() -> None:
-    provider = FakeStreamingProvider(
+    provider = FakeProvider(stream_sequences=
         [
             [
                 ProviderCompletedEvent(
                     response=ProviderResponse(
-                        response_id="resp_1",
                         tool_calls=[
                             {
                                 "call_id": "call_1",
@@ -741,8 +646,6 @@ async def test_stream_parallel_batch_emits_deterministic_lifecycle_events() -> N
                                 "raw_arguments": '{"message":"beta"}',
                             },
                         ],
-                        output_items=[],
-                        raw_response={"id": "resp_1"},
                     )
                 )
             ],
@@ -750,10 +653,7 @@ async def test_stream_parallel_batch_emits_deterministic_lifecycle_events() -> N
                 ProviderTextDeltaEvent(delta="done"),
                 ProviderCompletedEvent(
                     response=ProviderResponse(
-                        response_id="resp_2",
                         output_text="done",
-                        output_items=[],
-                        raw_response={"id": "resp_2"},
                     )
                 ),
             ],
@@ -803,12 +703,11 @@ def test_stream_sync_raises_on_provider_failure() -> None:
 
 
 def test_chat_session_stream_sync_preserves_history() -> None:
-    provider = FakeStreamingProvider(
+    provider = FakeProvider(stream_sequences=
         [
             [
                 ProviderCompletedEvent(
                     response=ProviderResponse(
-                        response_id="resp_1",
                         output_text="Stored.",
                         output_items=[
                             {
@@ -817,14 +716,12 @@ def test_chat_session_stream_sync_preserves_history() -> None:
                                 "content": [{"type": "output_text", "text": "Stored."}],
                             }
                         ],
-                        raw_response={"id": "resp_1"},
                     )
                 )
             ],
             [
                 ProviderCompletedEvent(
                     response=ProviderResponse(
-                        response_id="resp_2",
                         output_text="You said Anson.",
                         output_items=[
                             {
@@ -833,7 +730,6 @@ def test_chat_session_stream_sync_preserves_history() -> None:
                                 "content": [{"type": "output_text", "text": "You said Anson."}],
                             }
                         ],
-                        raw_response={"id": "resp_2"},
                     )
                 )
             ],
@@ -856,12 +752,11 @@ def test_chat_session_stream_sync_preserves_history() -> None:
 
 @pytest.mark.asyncio
 async def test_snapshot_after_streaming_completion_includes_completed_turn() -> None:
-    provider = FakeStreamingProvider(
+    provider = FakeProvider(stream_sequences=
         [
             [
                 ProviderCompletedEvent(
                     response=ProviderResponse(
-                        response_id="resp_1",
                         output_text="Stored.",
                         output_items=[
                             {
@@ -870,7 +765,6 @@ async def test_snapshot_after_streaming_completion_includes_completed_turn() -> 
                                 "content": [{"type": "output_text", "text": "Stored."}],
                             }
                         ],
-                        raw_response={"id": "resp_1"},
                     )
                 )
             ]
@@ -901,12 +795,11 @@ async def test_snapshot_after_streaming_completion_includes_completed_turn() -> 
 
 @pytest.mark.asyncio
 async def test_restored_chat_continues_correctly_after_prior_streamed_turns() -> None:
-    provider = FakeStreamingProvider(
+    provider = FakeProvider(stream_sequences=
         [
             [
                 ProviderCompletedEvent(
                     response=ProviderResponse(
-                        response_id="resp_1",
                         output_text="You said Anson.",
                         output_items=[
                             {
@@ -915,7 +808,6 @@ async def test_restored_chat_continues_correctly_after_prior_streamed_turns() ->
                                 "content": [{"type": "output_text", "text": "You said Anson."}],
                             }
                         ],
-                        raw_response={"id": "resp_1"},
                     )
                 )
             ]
@@ -971,18 +863,15 @@ async def test_restored_chat_continues_correctly_after_prior_streamed_turns() ->
 @pytest.mark.asyncio
 async def test_stream_returns_structured_output_on_completed_event() -> None:
     summary = Summary(title="Hello", bullets=["one", "two"])
-    provider = FakeStreamingProvider(
+    provider = FakeProvider(stream_sequences=
         [
             [
                 ProviderTextDeltaEvent(delta="{"),
                 ProviderTextDeltaEvent(delta='"title":"Hello"}'),
                 ProviderCompletedEvent(
                     response=ProviderResponse(
-                        response_id="resp_1",
                         output_text='{"title":"Hello","bullets":["one","two"]}',
                         output_data=summary,
-                        output_items=[],
-                        raw_response={"id": "resp_1"},
                     )
                 ),
             ]
@@ -1008,12 +897,11 @@ async def test_stream_returns_structured_output_on_completed_event() -> None:
 @pytest.mark.asyncio
 async def test_stream_returns_structured_output_after_tool_turn() -> None:
     summary = Summary(title="Weather", bullets=["Foggy", "65F"])
-    provider = FakeStreamingProvider(
+    provider = FakeProvider(stream_sequences=
         [
             [
                 ProviderCompletedEvent(
                     response=ProviderResponse(
-                        response_id="resp_1",
                         tool_calls=[
                             {
                                 "call_id": "call_1",
@@ -1022,8 +910,6 @@ async def test_stream_returns_structured_output_after_tool_turn() -> None:
                                 "raw_arguments": '{"message":"hello"}',
                             }
                         ],
-                        output_items=[],
-                        raw_response={"id": "resp_1"},
                     )
                 )
             ],
@@ -1031,11 +917,8 @@ async def test_stream_returns_structured_output_after_tool_turn() -> None:
                 ProviderTextDeltaEvent(delta="done"),
                 ProviderCompletedEvent(
                     response=ProviderResponse(
-                        response_id="resp_2",
                         output_text='{"title":"Weather","bullets":["Foggy","65F"]}',
                         output_data=summary,
-                        output_items=[],
-                        raw_response={"id": "resp_2"},
                     )
                 ),
             ],
@@ -1065,12 +948,11 @@ async def test_stream_returns_structured_output_after_tool_turn() -> None:
 
 @pytest.mark.asyncio
 async def test_stream_parallel_tool_failure_raises() -> None:
-    provider = FakeStreamingProvider(
+    provider = FakeProvider(stream_sequences=
         [
             [
                 ProviderCompletedEvent(
                     response=ProviderResponse(
-                        response_id="resp_1",
                         tool_calls=[
                             {
                                 "call_id": "call_1",
@@ -1085,8 +967,6 @@ async def test_stream_parallel_tool_failure_raises() -> None:
                                 "raw_arguments": '{"message":"boom"}',
                             },
                         ],
-                        output_items=[],
-                        raw_response={"id": "resp_1"},
                     )
                 )
             ]

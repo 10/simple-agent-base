@@ -9,6 +9,8 @@ import tempfile
 import struct
 import time
 import zlib
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 from typing import Literal
@@ -110,12 +112,6 @@ def make_demo_mcp_server(*, require_approval: bool) -> MCPServer:
     )
 
 
-def make_demo_mcp_http_server() -> tuple[MCPServer, "DemoHTTPFixture"]:
-    fixture = DemoHTTPFixture()
-    fixture.start()
-    return MCPServer.http(name="demohttp", url=fixture.url), fixture
-
-
 def make_red_png_file() -> Path:
     handle = tempfile.NamedTemporaryFile(prefix="simple-agent-base-live-", suffix=".png", delete=False)
     path = Path(handle.name)
@@ -203,35 +199,27 @@ def _wait_for_http_server(host: str, port: int) -> None:
     raise RuntimeError(f"HTTP MCP fixture did not start: {last_error}")
 
 
-class DemoHTTPFixture:
-    def __init__(self) -> None:
-        self.fixture_path = Path(__file__).resolve().parent.parent / "tests" / "fixtures" / "mcp_demo_server.py"
-        ensure(self.fixture_path.exists(), f"Missing MCP fixture server: {self.fixture_path}")
-        self.port = _free_port()
-        self.url = f"http://127.0.0.1:{self.port}/mcp"
-        self._process: subprocess.Popen[bytes] | None = None
-
-    def start(self) -> None:
-        self._process = subprocess.Popen(
-            [sys.executable, str(self.fixture_path), "http", str(self.port)],
-            cwd=str(self.fixture_path.parent.parent.parent),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        _wait_for_http_server("127.0.0.1", self.port)
-
-    def stop(self) -> None:
-        if self._process is None:
-            return
-
-        self._process.terminate()
+@contextmanager
+def demo_mcp_http_server() -> Iterator[MCPServer]:
+    fixture_path = Path(__file__).resolve().parent.parent / "tests" / "fixtures" / "mcp_demo_server.py"
+    ensure(fixture_path.exists(), f"Missing MCP fixture server: {fixture_path}")
+    port = _free_port()
+    process = subprocess.Popen(
+        [sys.executable, str(fixture_path), "http", str(port)],
+        cwd=str(fixture_path.parent.parent.parent),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        _wait_for_http_server("127.0.0.1", port)
+        yield MCPServer.http(name="demohttp", url=f"http://127.0.0.1:{port}/mcp")
+    finally:
+        process.terminate()
         try:
-            self._process.wait(timeout=5)
+            process.wait(timeout=5)
         except subprocess.TimeoutExpired:
-            self._process.kill()
-            self._process.wait(timeout=5)
-        finally:
-            self._process = None
+            process.kill()
+            process.wait(timeout=5)
 
 
 def print_config_summary() -> None:
@@ -270,26 +258,6 @@ def describe_message_content(content: Any) -> list[str]:
                     preview = "unknown"
                 filename_suffix = f" [filename={part.filename}]" if part.filename else ""
                 lines.append(f"part {index}: file -> {preview}{filename_suffix}")
-            elif isinstance(part, dict):
-                part_type = part.get("type")
-                if part_type == "text":
-                    lines.append(f"part {index}: text -> {part.get('text')}")
-                elif part_type == "image":
-                    image_url = part.get("image_url", "")
-                    if isinstance(image_url, str) and image_url.startswith("data:"):
-                        preview = f"data-url ({len(image_url)} chars)"
-                    else:
-                        preview = str(image_url)
-                    lines.append(f"part {index}: image -> {preview} [detail={part.get('detail', 'auto')}]")
-                elif part_type == "file":
-                    preview = (
-                        part.get("file_url")
-                        or f"data-url ({len(str(part.get('file_data', '')))} chars)"
-                    )
-                    filename_suffix = f" [filename={part.get('filename')}]" if part.get("filename") else ""
-                    lines.append(f"part {index}: file -> {preview}{filename_suffix}")
-                else:
-                    lines.append(f"part {index}: raw -> {part}")
             else:
                 lines.append(f"part {index}: raw -> {part}")
     return lines
@@ -481,8 +449,6 @@ def _run_sync_usage_blocking() -> None:
                 final_text = event.result.output_text
                 print("Completed event received.")
                 print_result_details(event.result)
-            elif event.type == "error" and event.error:
-                print(f"- error: {event.error}")
         ensure(saw_delta, "Sync streaming did not emit any text deltas.")
         ensure(final_text is not None and final_text.strip(), "Sync streaming did not produce a final result.")
     finally:
@@ -494,18 +460,8 @@ async def run_sync_usage() -> None:
 
 
 async def run_parallel_tool_calls() -> None:
-    base_config = make_config()
     agent = Agent(
-        config=AgentConfig(
-            model=base_config.model,
-            api_key=base_config.api_key,
-            base_url=base_config.base_url,
-            max_turns=base_config.max_turns,
-            parallel_tool_calls=True,
-            reasoning_effort=base_config.reasoning_effort,
-            temperature=base_config.temperature,
-            timeout=base_config.timeout,
-        ),
+        config=make_config().model_copy(update={"parallel_tool_calls": True}),
         tools=[slow_tool_a, slow_tool_b],
     )
     prompt = (
@@ -846,35 +802,33 @@ async def run_mcp_server_with_approval() -> None:
 
 
 async def run_mcp_http_server() -> None:
-    server, fixture = make_demo_mcp_http_server()
-
-    agent = Agent(
-        config=make_config(),
-        mcp_servers=[server],
-    )
-    prompt = (
-        "Use the demohttp MCP server add tool with 2 and 3. "
-        "Then reply with one short sentence that includes the result."
-    )
-    try:
-        print("MCP servers:")
-        print(f"- demohttp -> streamable_http via {server.url}")
-        print_input("Sending prompt:", prompt)
-        result = await agent.run(prompt)
-        print_result_details(result)
-        ensure(result.output_text.strip(), "HTTP MCP run returned empty output_text.")
-        ensure(len(result.mcp_calls) >= 1, "Expected at least one mcp_call in result.mcp_calls.")
-        ensure(
-            all(call.server_name == "demohttp" for call in result.mcp_calls),
-            "Unexpected HTTP mcp_call server_name.",
+    with demo_mcp_http_server() as server:
+        agent = Agent(
+            config=make_config(),
+            mcp_servers=[server],
         )
-        ensure(
-            any(call.name == "add" and call.output == "5" for call in result.mcp_calls),
-            "HTTP MCP run did not record the expected add tool result.",
+        prompt = (
+            "Use the demohttp MCP server add tool with 2 and 3. "
+            "Then reply with one short sentence that includes the result."
         )
-    finally:
-        await agent.aclose()
-        fixture.stop()
+        try:
+            print("MCP servers:")
+            print(f"- demohttp -> streamable_http via {server.url}")
+            print_input("Sending prompt:", prompt)
+            result = await agent.run(prompt)
+            print_result_details(result)
+            ensure(result.output_text.strip(), "HTTP MCP run returned empty output_text.")
+            ensure(len(result.mcp_calls) >= 1, "Expected at least one mcp_call in result.mcp_calls.")
+            ensure(
+                all(call.server_name == "demohttp" for call in result.mcp_calls),
+                "Unexpected HTTP mcp_call server_name.",
+            )
+            ensure(
+                any(call.name == "add" and call.output == "5" for call in result.mcp_calls),
+                "HTTP MCP run did not record the expected add tool result.",
+            )
+        finally:
+            await agent.aclose()
 
 
 async def run_mcp_streaming() -> None:
@@ -916,8 +870,6 @@ async def run_mcp_streaming() -> None:
                 final_result = event.result
                 print("Completed event received.")
                 print_result_details(event.result)
-            elif event.type == "error" and event.error:
-                print(f"- error: {event.error}")
         ensure(saw_mcp_started, "Streaming did not emit mcp_call_started.")
         ensure(saw_mcp_completed, "Streaming did not emit mcp_call_completed.")
         ensure(final_result is not None, "Streaming did not emit a completed event.")
@@ -963,16 +915,16 @@ async def main() -> None:
     args = parse_args()
     print_config_summary()
 
-    checks: list[tuple[str, Any]]
-    if args.mcp_only:
-        checks = [
-            ("MCP Server", run_mcp_server),
-            ("MCP Server With Approval", run_mcp_server_with_approval),
-            ("MCP HTTP Server", run_mcp_http_server),
-            ("MCP Streaming", run_mcp_streaming),
-        ]
-    else:
-        checks = [
+    mcp_checks = [
+        ("MCP Server", run_mcp_server),
+        ("MCP Server With Approval", run_mcp_server_with_approval),
+        ("MCP HTTP Server", run_mcp_http_server),
+        ("MCP Streaming", run_mcp_streaming),
+    ]
+    checks: list[tuple[str, Any]] = (
+        mcp_checks
+        if args.mcp_only
+        else [
             ("Plain Text", run_plain_text),
             ("Structured Output", run_structured_output),
             ("System Prompt", run_system_prompt),
@@ -986,11 +938,9 @@ async def main() -> None:
             ("Reasoning", run_reasoning),
             ("Image Structured Output", run_image_structured_output),
             ("Chat With Image Follow-Up", run_chat_with_image_follow_up),
-            ("MCP Server", run_mcp_server),
-            ("MCP Server With Approval", run_mcp_server_with_approval),
-            ("MCP HTTP Server", run_mcp_http_server),
-            ("MCP Streaming", run_mcp_streaming),
+            *mcp_checks,
         ]
+    )
 
     results = [await run_check(name, fn) for name, fn in checks]
 

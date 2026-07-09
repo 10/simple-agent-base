@@ -23,13 +23,11 @@ from simple_agent_base.mcp import (
     MCPCallRecord,
     MCPToolDefinition,
     MCPServer,
-    build_mcp_approval_request,
-    mcp_result_payload,
     normalize_mcp_tool_result,
 )
 from simple_agent_base.providers.base import Provider, ProviderResponse
 from simple_agent_base.providers.openai import OpenAIResponsesProvider
-from simple_agent_base.sync_utils import SyncRuntime, ensure_sync_allowed, run_sync_awaitable
+from simple_agent_base.sync_utils import SyncRuntime, ensure_sync_allowed
 from simple_agent_base.tools import ToolRegistry
 from simple_agent_base.transcript import (
     build_transcript,
@@ -57,20 +55,6 @@ T = TypeVar("T")
 class _ExecutedCall:
     tool_result: ToolExecutionResult
     mcp_call: MCPCallRecord | None = None
-    emit_mcp_events: bool = True
-
-
-@dataclass(slots=True)
-class _PreparedToolCall:
-    events: list[AgentEvent]
-    mcp_tool: MCPToolDefinition | None = None
-
-
-@dataclass(slots=True)
-class _StreamToolExecution:
-    events: list[AgentEvent]
-    denied_call: _ExecutedCall | None = None
-    skip_mcp_approval: bool = False
 
 
 class Agent:
@@ -88,10 +72,20 @@ class Agent:
         self.registry = tools if isinstance(tools, ToolRegistry) else ToolRegistry(tools)
         self.provider = provider or OpenAIResponsesProvider(config)
         self.system_prompt = clean_system_prompt(system_prompt)
-        self.mcp_servers: list[MCPServer] = list(mcp_servers or [])
-        self.hosted_tools: list[JSONObject] = self._validate_hosted_tools(hosted_tools)
+        self.hosted_tools: list[JSONObject] = []
+        for index, entry in enumerate(hosted_tools or []):
+            if not isinstance(entry, dict):
+                raise ToolRegistrationError(
+                    f"hosted_tools[{index}] must be a dict, got {type(entry).__name__}."
+                )
+            tool_type = entry.get("type")
+            if not isinstance(tool_type, str) or not tool_type:
+                raise ToolRegistrationError(
+                    f"hosted_tools[{index}] must include a non-empty string 'type' field."
+                )
+            self.hosted_tools.append(dict(entry))
         self.approval_handler = approval_handler
-        self._mcp_manager = MCPBridgeManager(self.mcp_servers)
+        self._mcp_manager = MCPBridgeManager(list(mcp_servers or []))
         self._sync_runtime: SyncRuntime | None = None
 
     async def run(
@@ -103,7 +97,7 @@ class Agent:
     ) -> AgentRunResult:
         transcript = build_transcript(
             input_data,
-            system_prompt=self._resolve_system_prompt(system_prompt),
+            system_prompt=clean_system_prompt(system_prompt) or self.system_prompt,
         )
         return await self._run_transcript(transcript, response_model=response_model)
 
@@ -116,7 +110,7 @@ class Agent:
     ) -> AsyncIterator[AgentEvent]:
         transcript = build_transcript(
             input_data,
-            system_prompt=self._resolve_system_prompt(system_prompt),
+            system_prompt=clean_system_prompt(system_prompt) or self.system_prompt,
         )
         async for event in self._stream_transcript(transcript, response_model=response_model):
             yield event
@@ -127,13 +121,11 @@ class Agent:
         *,
         system_prompt: str | None = None,
     ) -> ChatSession:
-        initial_items: list[ConversationItem] = []
-        if messages is not None:
-            initial_items = normalize_input(messages)
+        initial_items = normalize_input(messages) if messages is not None else []
         return ChatSession(
             self,
             items=initial_items,
-            system_prompt=self._resolve_system_prompt(system_prompt),
+            system_prompt=clean_system_prompt(system_prompt) or self.system_prompt,
         )
 
     def chat_from_snapshot(
@@ -172,14 +164,13 @@ class Agent:
         response_model: type[BaseModel] | None = None,
         system_prompt: str | None = None,
     ) -> AgentRunResult:
-        return self._run_sync_call(
+        ensure_sync_allowed("run_sync()", "await agent.run(...)")
+        return self._get_sync_runtime().run(
             lambda: self.run(
                 input_data,
                 response_model=response_model,
                 system_prompt=system_prompt,
-            ),
-            api_name="run_sync()",
-            async_hint="await agent.run(...)",
+            )
         )
 
     def stream_sync(
@@ -189,14 +180,13 @@ class Agent:
         response_model: type[BaseModel] | None = None,
         system_prompt: str | None = None,
     ) -> Iterator[AgentEvent]:
-        return self._stream_sync_call(
+        ensure_sync_allowed("stream_sync()", "async for event in agent.stream(...)")
+        return self._get_sync_runtime().iterate(
             lambda: self.stream(
                 input_data,
                 response_model=response_model,
                 system_prompt=system_prompt,
-            ),
-            api_name="stream_sync()",
-            async_hint="async for event in agent.stream(...)",
+            )
         )
 
     def close(self) -> None:
@@ -209,7 +199,7 @@ class Agent:
                 self._sync_runtime = None
             return
 
-        run_sync_awaitable(self.aclose())
+        asyncio.run(self.aclose())
 
     async def _run_transcript(
         self,
@@ -289,14 +279,7 @@ class Agent:
                 }:
                     yield AgentEvent(
                         type=event.type,
-                        hosted_tool_call=HostedToolCallUpdate(
-                            item_id=event.item_id,
-                            tool_type=event.tool_type,
-                            status=event.status,
-                            output_index=event.output_index,
-                            sequence_number=event.sequence_number,
-                            item=event.item,
-                        ),
+                        hosted_tool_call=HostedToolCallUpdate(**event.model_dump(exclude={"type"})),
                     )
                 elif event.type == "completed":
                     final_response = event.response
@@ -363,10 +346,7 @@ class Agent:
         calls: Sequence[ToolCallRequest],
     ) -> list[_ExecutedCall]:
         if not self.config.parallel_tool_calls:
-            results: list[_ExecutedCall] = []
-            for call in calls:
-                results.append(await self._execute_tool(call))
-            return results
+            return [await self._execute_tool(call) for call in calls]
 
         return list(await asyncio.gather(*(self._execute_tool(call) for call in calls)))
 
@@ -378,64 +358,49 @@ class Agent:
         mcp_calls: list[MCPCallRecord],
         transcript: list[ConversationItem],
     ) -> AsyncIterator[AgentEvent]:
-        if self.config.parallel_tool_calls:
-            pending: list[asyncio.Task[_ExecutedCall]] = []
-            for call in calls:
-                prepared = self._prepare_tool_call_for_stream(call)
-                for event in prepared.events:
-                    yield event
-                execution = await self._resolve_prepared_tool_call_for_stream(call, prepared)
-                for event in execution.events:
-                    yield event
-                if execution.denied_call is not None:
-                    for event in self._append_executed_call_events(
-                        execution.denied_call,
-                        tool_results=tool_results,
-                        mcp_calls=mcp_calls,
-                        transcript=transcript,
-                    ):
-                        yield event
-                    continue
-                pending.append(
-                    asyncio.create_task(
-                        self._execute_tool(call, skip_mcp_approval=execution.skip_mcp_approval)
+        pending: list[asyncio.Task[_ExecutedCall]] = []
+        for call in calls:
+            skip_mcp_approval = False
+            if self._mcp_manager.has_tool(call.name):
+                tool = self._mcp_manager.get_tool(call.name)
+                if tool.require_approval:
+                    yield AgentEvent(
+                        type="mcp_approval_requested",
+                        mcp_approval=self._build_mcp_approval_request(tool, call),
                     )
+                    approved = await self._approve_mcp_call(
+                        self._build_mcp_approval_request(tool, call)
+                    )
+                    if not approved:
+                        for event in self._append_executed_call_events(
+                            self._build_denied_mcp_call(tool, call),
+                            tool_results=tool_results,
+                            mcp_calls=mcp_calls,
+                            transcript=transcript,
+                        ):
+                            yield event
+                        continue
+                    skip_mcp_approval = True
+
+                yield AgentEvent(
+                    type="mcp_call_started",
+                    mcp_call=MCPCallRecord(
+                        id=call.call_id,
+                        server_name=tool.server_name,
+                        name=tool.tool_name,
+                        arguments=call.arguments,
+                    ),
                 )
 
-            if not pending:
-                return
-
-            executed_calls = await asyncio.gather(*pending)
-            for executed in executed_calls:
-                for event in self._append_executed_call_events(
-                    executed,
-                    tool_results=tool_results,
-                    mcp_calls=mcp_calls,
-                    transcript=transcript,
-                ):
-                    yield event
-            return
-
-        for call in calls:
-            prepared = self._prepare_tool_call_for_stream(call)
-            for event in prepared.events:
-                yield event
-            execution = await self._resolve_prepared_tool_call_for_stream(call, prepared)
-            for event in execution.events:
-                yield event
-            if execution.denied_call is not None:
-                for event in self._append_executed_call_events(
-                    execution.denied_call,
-                    tool_results=tool_results,
-                    mcp_calls=mcp_calls,
-                    transcript=transcript,
-                ):
-                    yield event
+            if self.config.parallel_tool_calls:
+                pending.append(
+                    asyncio.create_task(
+                        self._execute_tool(call, skip_mcp_approval=skip_mcp_approval)
+                    )
+                )
                 continue
-            executed = await self._execute_tool(
-                call,
-                skip_mcp_approval=execution.skip_mcp_approval,
-            )
+
+            executed = await self._execute_tool(call, skip_mcp_approval=skip_mcp_approval)
             for event in self._append_executed_call_events(
                 executed,
                 tool_results=tool_results,
@@ -444,32 +409,22 @@ class Agent:
             ):
                 yield event
 
+        if self.config.parallel_tool_calls:
+            for executed in await asyncio.gather(*pending):
+                for event in self._append_executed_call_events(
+                    executed,
+                    tool_results=tool_results,
+                    mcp_calls=mcp_calls,
+                    transcript=transcript,
+                ):
+                    yield event
+
     def _build_tool_params(self) -> list[JSONObject]:
-        tools = list(self.registry.to_openai_tools())
-        tools.extend(self._mcp_manager.to_openai_tools())
-        tools.extend(self.hosted_tools)
-        return tools
-
-    @staticmethod
-    def _validate_hosted_tools(
-        hosted_tools: Sequence[JSONObject] | None,
-    ) -> list[JSONObject]:
-        if not hosted_tools:
-            return []
-
-        validated: list[JSONObject] = []
-        for index, entry in enumerate(hosted_tools):
-            if not isinstance(entry, dict):
-                raise ToolRegistrationError(
-                    f"hosted_tools[{index}] must be a dict, got {type(entry).__name__}."
-                )
-            tool_type = entry.get("type")
-            if not isinstance(tool_type, str) or not tool_type:
-                raise ToolRegistrationError(
-                    f"hosted_tools[{index}] must include a non-empty string 'type' field."
-                )
-            validated.append(dict(entry))
-        return validated
+        return [
+            *self.registry.to_openai_tools(),
+            *self._mcp_manager.to_openai_tools(),
+            *self.hosted_tools,
+        ]
 
     @staticmethod
     def _build_run_result(
@@ -509,8 +464,11 @@ class Agent:
 
     @staticmethod
     def _sum_optional_usage_field(usages: Sequence[UsageMetadata], field_name: str) -> int | None:
-        values = [getattr(usage, field_name) for usage in usages]
-        present = [value for value in values if isinstance(value, int)]
+        present = [
+            value
+            for usage in usages
+            if isinstance((value := getattr(usage, field_name)), int)
+        ]
         return sum(present) if present else None
 
     async def _execute_mcp_tool(
@@ -528,22 +486,18 @@ class Agent:
         if not approved:
             return self._build_denied_mcp_call(tool, call)
 
-        async def call_mcp() -> tuple[MCPToolDefinition, object, str]:
-            called_tool, raw_result = await self._mcp_manager.call_tool(
-                namespaced_name=call.name,
-                arguments=call.arguments,
-            )
-            output = normalize_mcp_tool_result(raw_result)
-            return called_tool, raw_result, output
-
         try:
-            tool, raw_result, output = await self._with_tool_timeout(
-                call_mcp(),
+            raw_result = await self._with_tool_timeout(
+                self._mcp_manager.call_tool(
+                    namespaced_name=call.name,
+                    arguments=call.arguments,
+                ),
                 timeout_message=(
                     f"MCP tool '{tool.tool_name}' timed out after "
                     f"{self.config.tool_timeout} seconds."
                 ),
             )
+            output = normalize_mcp_tool_result(raw_result)
         except ToolExecutionError:
             raise
         except Exception as exc:
@@ -558,7 +512,7 @@ class Agent:
                 name=call.name,
                 arguments=call.arguments,
                 output=output,
-                raw_output=mcp_result_payload(raw_result),
+                raw_output=raw_result.model_dump(mode="json", warnings="none"),
             ),
             mcp_call=MCPCallRecord(
                 id=call.call_id,
@@ -583,46 +537,6 @@ class Agent:
         except TimeoutError as exc:
             raise ToolExecutionError(timeout_message) from exc
 
-    def _prepare_tool_call_for_stream(
-        self,
-        call: ToolCallRequest,
-    ) -> _PreparedToolCall:
-        if not self._mcp_manager.has_tool(call.name):
-            return _PreparedToolCall(events=[])
-
-        tool = self._mcp_manager.get_tool(call.name)
-        events: list[AgentEvent] = []
-        if tool.require_approval:
-            approval_event = self._build_mcp_approval_event(call)
-            if approval_event is not None:
-                events.append(approval_event)
-            return _PreparedToolCall(events=events, mcp_tool=tool)
-
-        events.append(self._build_mcp_started_event(call))
-        return _PreparedToolCall(events=events)
-
-    async def _resolve_prepared_tool_call_for_stream(
-        self,
-        call: ToolCallRequest,
-        prepared: _PreparedToolCall,
-    ) -> _StreamToolExecution:
-        if prepared.mcp_tool is None:
-            return _StreamToolExecution(events=[])
-
-        approved = await self._approve_mcp_call(
-            self._build_mcp_approval_request(prepared.mcp_tool, call)
-        )
-        if not approved:
-            return _StreamToolExecution(
-                events=[],
-                denied_call=self._build_denied_mcp_call(prepared.mcp_tool, call),
-            )
-
-        return _StreamToolExecution(
-            events=[self._build_mcp_started_event(call)],
-            skip_mcp_approval=True,
-        )
-
     def _build_denied_mcp_call(self, tool: MCPToolDefinition, call: ToolCallRequest) -> _ExecutedCall:
         message = "MCP tool call denied by approval handler."
         return _ExecutedCall(
@@ -639,7 +553,6 @@ class Agent:
                 arguments=call.arguments,
                 error=message,
             ),
-            emit_mcp_events=False,
         )
 
     def _append_executed_call_events(
@@ -653,7 +566,7 @@ class Agent:
         events: list[AgentEvent] = []
         if executed.mcp_call is not None:
             mcp_calls.append(executed.mcp_call)
-            if executed.emit_mcp_events:
+            if executed.mcp_call.error is None:
                 events.append(AgentEvent(type="mcp_call_completed", mcp_call=executed.mcp_call))
 
         tool_results.append(executed.tool_result)
@@ -666,32 +579,11 @@ class Agent:
         tool: MCPToolDefinition,
         call: ToolCallRequest,
     ) -> MCPApprovalRequest:
-        return build_mcp_approval_request(
-            request_id=f"mcp-approval-{call.call_id}",
+        return MCPApprovalRequest(
+            id=f"mcp-approval-{call.call_id}",
             server_name=tool.server_name,
-            tool_name=tool.tool_name,
+            name=tool.tool_name,
             arguments=call.arguments,
-        )
-
-    def _build_mcp_approval_event(self, call: ToolCallRequest) -> AgentEvent | None:
-        tool = self._mcp_manager.get_tool(call.name)
-        if not tool.require_approval:
-            return None
-        return AgentEvent(
-            type="mcp_approval_requested",
-            mcp_approval=self._build_mcp_approval_request(tool, call),
-        )
-
-    def _build_mcp_started_event(self, call: ToolCallRequest) -> AgentEvent:
-        tool = self._mcp_manager.get_tool(call.name)
-        return AgentEvent(
-            type="mcp_call_started",
-            mcp_call=MCPCallRecord(
-                id=call.call_id,
-                server_name=tool.server_name,
-                name=tool.tool_name,
-                arguments=call.arguments,
-            ),
         )
 
     async def _approve_mcp_call(self, approval: MCPApprovalRequest) -> bool:
@@ -706,40 +598,7 @@ class Agent:
             return bool(await result)
         return bool(result)
 
-    def _run_sync_call(
-        self,
-        awaitable_factory: Callable[[], Awaitable[T]],
-        *,
-        api_name: str,
-        async_hint: str,
-    ) -> T:
-        ensure_sync_allowed(api_name, async_hint)
-        return self._get_sync_runtime().run(awaitable_factory)
-
-    def _stream_sync_call(
-        self,
-        async_iterable_factory: Callable[[], AsyncIterator[T]],
-        *,
-        api_name: str,
-        async_hint: str,
-    ) -> Iterator[T]:
-        ensure_sync_allowed(api_name, async_hint)
-        return self._get_sync_runtime().iterate(async_iterable_factory)
-
     def _get_sync_runtime(self) -> SyncRuntime:
         if self._sync_runtime is None:
             self._sync_runtime = SyncRuntime()
         return self._sync_runtime
-
-    def _resolve_system_prompt(self, system_prompt: str | None) -> str | None:
-        return self._resolve_system_prompt_with_default(system_prompt, self.system_prompt)
-
-    def _resolve_system_prompt_with_default(
-        self,
-        system_prompt: str | None,
-        default: str | None,
-    ) -> str | None:
-        cleaned = clean_system_prompt(system_prompt)
-        if cleaned is not None:
-            return cleaned
-        return default

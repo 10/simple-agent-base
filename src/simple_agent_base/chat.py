@@ -5,7 +5,8 @@ from typing import TYPE_CHECKING
 
 from pydantic import BaseModel
 
-from simple_agent_base.transcript import build_transcript, messages_from_items, persist_chat_items
+from simple_agent_base.transcript import build_transcript, clean_system_prompt, messages_from_items, persist_chat_items
+from simple_agent_base.sync_utils import ensure_sync_allowed
 from simple_agent_base.types import (
     AgentEvent,
     AgentRunResult,
@@ -55,10 +56,7 @@ class ChatSession:
         response_model: type[BaseModel] | None = None,
         system_prompt: str | None = None,
     ) -> AgentRunResult:
-        resolved_system_prompt = self._agent._resolve_system_prompt_with_default(
-            system_prompt,
-            self._system_prompt,
-        )
+        resolved_system_prompt = clean_system_prompt(system_prompt) or self._system_prompt
         transcript = build_transcript(
             input_data,
             system_prompt=resolved_system_prompt,
@@ -78,10 +76,7 @@ class ChatSession:
         response_model: type[BaseModel] | None = None,
         system_prompt: str | None = None,
     ) -> AsyncIterator[AgentEvent]:
-        resolved_system_prompt = self._agent._resolve_system_prompt_with_default(
-            system_prompt,
-            self._system_prompt,
-        )
+        resolved_system_prompt = clean_system_prompt(system_prompt) or self._system_prompt
         transcript = build_transcript(
             input_data,
             system_prompt=resolved_system_prompt,
@@ -106,14 +101,13 @@ class ChatSession:
         response_model: type[BaseModel] | None = None,
         system_prompt: str | None = None,
     ) -> AgentRunResult:
-        return self._agent._run_sync_call(
+        ensure_sync_allowed("run_sync()", "await chat.run(...)")
+        return self._agent._get_sync_runtime().run(
             lambda: self.run(
                 input_data,
                 response_model=response_model,
                 system_prompt=system_prompt,
-            ),
-            api_name="run_sync()",
-            async_hint="await chat.run(...)",
+            )
         )
 
     def stream_sync(
@@ -123,12 +117,11 @@ class ChatSession:
         response_model: type[BaseModel] | None = None,
         system_prompt: str | None = None,
     ) -> Iterator[AgentEvent]:
-        return self._agent._stream_sync_call(
+        ensure_sync_allowed("stream_sync()", "async for event in chat.stream(...)")
+        return self._agent._get_sync_runtime().iterate(
             lambda: self.stream(
                 input_data,
                 response_model=response_model,
                 system_prompt=system_prompt,
-            ),
-            api_name="stream_sync()",
-            async_hint="async for event in chat.stream(...)",
+            )
         )

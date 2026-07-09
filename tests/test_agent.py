@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
 import pytest
 from pydantic import BaseModel
 
+from conftest import FakeProvider
 from simple_agent_base import Agent, AgentConfig, ChatMessage, FilePart, ImagePart, TextPart, UsageMetadata, tool
 from simple_agent_base.errors import (
     MaxTurnsExceededError,
@@ -16,44 +17,8 @@ from simple_agent_base.errors import (
     ToolExecutionError,
     ToolRegistrationError,
 )
-from simple_agent_base.providers.base import ProviderEvent, ProviderResponse
+from simple_agent_base.providers.base import ProviderResponse
 from simple_agent_base.types import ConversationItem
-
-
-class FakeProvider:
-    def __init__(self, responses: list[ProviderResponse]) -> None:
-        self.responses = list(responses)
-        self.calls: list[dict[str, Any]] = []
-
-    async def create_response(
-        self,
-        *,
-        input_items: Sequence[ConversationItem],
-        tools: Sequence[dict[str, Any]],
-        response_model: type[BaseModel] | None = None,
-    ) -> ProviderResponse:
-        self.calls.append(
-            {
-                "input_items": list(input_items),
-                "tools": list(tools),
-                "response_model": response_model,
-            }
-        )
-        if not self.responses:
-            raise ProviderError("No more fake responses configured.")
-        return self.responses.pop(0)
-
-    async def stream_response(
-        self,
-        *,
-        input_items: Sequence[ConversationItem],
-        tools: Sequence[dict[str, Any]],
-        response_model: type[BaseModel] | None = None,
-    ) -> AsyncIterator[ProviderEvent]:
-        raise NotImplementedError
-
-    async def close(self) -> None:
-        return None
 
 
 class ClosableFakeProvider(FakeProvider):
@@ -133,11 +98,8 @@ REASONING_SUMMARY = "I checked the constraint and kept the answer exact."
 
 def make_reasoning_response(*, reasoning_summary: str | None) -> ProviderResponse:
     return ProviderResponse(
-        response_id="resp_1",
         output_text="reasoning-ok",
         reasoning_summary=reasoning_summary,
-        output_items=[],
-        raw_response={"id": "resp_1"},
     )
 
 
@@ -164,6 +126,8 @@ async def test_run_without_tools_returns_plain_text() -> None:
     result = await agent.run("Say hello.")
 
     assert result.output_text == "hello world"
+    assert result.response_id == "resp_1"
+    assert result.raw_responses == [{"id": "resp_1"}]
     assert result.output_data is None
     assert result.tool_results == []
 
@@ -184,10 +148,7 @@ async def test_run_returns_none_usage_when_provider_omits_usage() -> None:
     provider = FakeProvider(
         [
             ProviderResponse(
-                response_id="resp_1",
                 output_text="hello world",
-                output_items=[],
-                raw_response={"id": "resp_1"},
             )
         ]
     )
@@ -204,7 +165,6 @@ async def test_run_aggregates_usage_across_tool_turns() -> None:
     provider = FakeProvider(
         [
             ProviderResponse(
-                response_id="resp_1",
                 tool_calls=[
                     {
                         "call_id": "call_1",
@@ -213,16 +173,11 @@ async def test_run_aggregates_usage_across_tool_turns() -> None:
                         "raw_arguments": '{"message":"hello"}',
                     }
                 ],
-                output_items=[],
                 usage=UsageMetadata(input_tokens=10, output_tokens=2, total_tokens=12),
-                raw_response={"id": "resp_1"},
             ),
             ProviderResponse(
-                response_id="resp_2",
                 output_text="done",
-                output_items=[],
                 usage=UsageMetadata(input_tokens=8, output_tokens=4, total_tokens=12),
-                raw_response={"id": "resp_2"},
             ),
         ]
     )
@@ -247,7 +202,6 @@ async def test_run_aggregates_partial_usage_fields() -> None:
     provider = FakeProvider(
         [
             ProviderResponse(
-                response_id="resp_1",
                 tool_calls=[
                     {
                         "call_id": "call_1",
@@ -256,16 +210,11 @@ async def test_run_aggregates_partial_usage_fields() -> None:
                         "raw_arguments": '{"message":"hello"}',
                     }
                 ],
-                output_items=[],
                 usage=UsageMetadata(input_tokens=10),
-                raw_response={"id": "resp_1"},
             ),
             ProviderResponse(
-                response_id="resp_2",
                 output_text="done",
-                output_items=[],
                 usage=UsageMetadata(output_tokens=4),
-                raw_response={"id": "resp_2"},
             ),
         ]
     )
@@ -295,10 +244,7 @@ def test_run_sync_returns_plain_text() -> None:
     provider = FakeProvider(
         [
             ProviderResponse(
-                response_id="resp_1",
                 output_text="hello world",
-                output_items=[],
-                raw_response={"id": "resp_1"},
             )
         ]
     )
@@ -362,7 +308,6 @@ def test_chat_session_run_sync_preserves_history() -> None:
     provider = FakeProvider(
         [
             ProviderResponse(
-                response_id="resp_1",
                 output_text="Stored.",
                 output_items=[
                     {
@@ -371,10 +316,8 @@ def test_chat_session_run_sync_preserves_history() -> None:
                         "content": [{"type": "output_text", "text": "Stored."}],
                     }
                 ],
-                raw_response={"id": "resp_1"},
             ),
             ProviderResponse(
-                response_id="resp_2",
                 output_text="You said Anson.",
                 output_items=[
                     {
@@ -383,7 +326,6 @@ def test_chat_session_run_sync_preserves_history() -> None:
                         "content": [{"type": "output_text", "text": "You said Anson."}],
                     }
                 ],
-                raw_response={"id": "resp_2"},
             ),
         ]
     )
@@ -408,7 +350,6 @@ async def test_chat_snapshot_returns_full_session_state() -> None:
     provider = FakeProvider(
         [
             ProviderResponse(
-                response_id="resp_1",
                 output_text="Stored.",
                 output_items=[
                     {
@@ -417,7 +358,6 @@ async def test_chat_snapshot_returns_full_session_state() -> None:
                         "content": [{"type": "output_text", "text": "Stored."}],
                     }
                 ],
-                raw_response={"id": "resp_1"},
             )
         ]
     )
@@ -448,7 +388,6 @@ async def test_chat_from_snapshot_restores_conversation_state() -> None:
     provider = FakeProvider(
         [
             ProviderResponse(
-                response_id="resp_1",
                 output_text="You said Anson.",
                 output_items=[
                     {
@@ -457,7 +396,6 @@ async def test_chat_from_snapshot_restores_conversation_state() -> None:
                         "content": [{"type": "output_text", "text": "You said Anson."}],
                     }
                 ],
-                raw_response={"id": "resp_1"},
             )
         ]
     )
@@ -513,7 +451,6 @@ async def test_restored_chat_uses_snapshot_system_prompt_over_agent_default() ->
     provider = FakeProvider(
         [
             ProviderResponse(
-                response_id="resp_1",
                 output_text="Done.",
                 output_items=[
                     {
@@ -522,7 +459,6 @@ async def test_restored_chat_uses_snapshot_system_prompt_over_agent_default() ->
                         "content": [{"type": "output_text", "text": "Done."}],
                     }
                 ],
-                raw_response={"id": "resp_1"},
             )
         ]
     )
@@ -553,7 +489,6 @@ async def test_snapshot_does_not_persist_convenience_prompt_as_message_item() ->
     provider = FakeProvider(
         [
             ProviderResponse(
-                response_id="resp_1",
                 output_text="Stored.",
                 output_items=[
                     {
@@ -562,7 +497,6 @@ async def test_snapshot_does_not_persist_convenience_prompt_as_message_item() ->
                         "content": [{"type": "output_text", "text": "Stored."}],
                     }
                 ],
-                raw_response={"id": "resp_1"},
             )
         ]
     )
@@ -580,7 +514,6 @@ async def test_chat_from_snapshot_preserves_multimodal_history() -> None:
     provider = FakeProvider(
         [
             ProviderResponse(
-                response_id="resp_1",
                 output_text="The image showed a cat.",
                 output_items=[
                     {
@@ -589,7 +522,6 @@ async def test_chat_from_snapshot_preserves_multimodal_history() -> None:
                         "content": [{"type": "output_text", "text": "The image showed a cat."}],
                     }
                 ],
-                raw_response={"id": "resp_1"},
             )
         ]
     )
@@ -654,7 +586,6 @@ async def test_chat_from_snapshot_preserves_file_history() -> None:
     provider = FakeProvider(
         [
             ProviderResponse(
-                response_id="resp_1",
                 output_text="The file mentioned teal.",
                 output_items=[
                     {
@@ -663,7 +594,6 @@ async def test_chat_from_snapshot_preserves_file_history() -> None:
                         "content": [{"type": "output_text", "text": "The file mentioned teal."}],
                     }
                 ],
-                raw_response={"id": "resp_1"},
             )
         ]
     )
@@ -725,10 +655,7 @@ async def test_run_prepends_agent_level_system_prompt() -> None:
     provider = FakeProvider(
         [
             ProviderResponse(
-                response_id="resp_1",
                 output_text="hello world",
-                output_items=[],
-                raw_response={"id": "resp_1"},
             )
         ]
     )
@@ -759,10 +686,7 @@ async def test_run_level_system_prompt_overrides_agent_default() -> None:
     provider = FakeProvider(
         [
             ProviderResponse(
-                response_id="resp_1",
                 output_text="hello world",
-                output_items=[],
-                raw_response={"id": "resp_1"},
             )
         ]
     )
@@ -793,10 +717,7 @@ async def test_run_accepts_multimodal_message() -> None:
     provider = FakeProvider(
         [
             ProviderResponse(
-                response_id="resp_1",
                 output_text="That looks like a cat.",
-                output_items=[],
-                raw_response={"id": "resp_1"},
             )
         ]
     )
@@ -836,10 +757,7 @@ async def test_run_accepts_file_message() -> None:
     provider = FakeProvider(
         [
             ProviderResponse(
-                response_id="resp_1",
                 output_text="The file says hello.",
-                output_items=[],
-                raw_response={"id": "resp_1"},
             )
         ]
     )
@@ -878,10 +796,7 @@ async def test_run_accepts_multiple_messages() -> None:
     provider = FakeProvider(
         [
             ProviderResponse(
-                response_id="resp_1",
                 output_text="I remember the earlier messages.",
-                output_items=[],
-                raw_response={"id": "resp_1"},
             )
         ]
     )
@@ -926,10 +841,7 @@ async def test_run_preserves_explicit_history_alongside_system_prompt() -> None:
     provider = FakeProvider(
         [
             ProviderResponse(
-                response_id="resp_1",
                 output_text="I remember the earlier messages.",
-                output_items=[],
-                raw_response={"id": "resp_1"},
             )
         ]
     )
@@ -970,7 +882,6 @@ async def test_run_executes_one_tool_then_returns_final_response() -> None:
     provider = FakeProvider(
         [
             ProviderResponse(
-                response_id="resp_1",
                 output_text="",
                 tool_calls=[
                     {
@@ -988,10 +899,8 @@ async def test_run_executes_one_tool_then_returns_final_response() -> None:
                         "arguments": '{"message":"hello"}',
                     }
                 ],
-                raw_response={"id": "resp_1"},
             ),
             ProviderResponse(
-                response_id="resp_2",
                 output_text="The tool said pong: hello",
                 output_items=[
                     {
@@ -1000,7 +909,6 @@ async def test_run_executes_one_tool_then_returns_final_response() -> None:
                         "content": [{"type": "output_text", "text": "The tool said pong: hello"}],
                     }
                 ],
-                raw_response={"id": "resp_2"},
             ),
         ]
     )
@@ -1023,7 +931,6 @@ async def test_run_executes_multiple_sequential_tool_calls() -> None:
     provider = FakeProvider(
         [
             ProviderResponse(
-                response_id="resp_1",
                 tool_calls=[
                     {
                         "call_id": "call_1",
@@ -1052,13 +959,9 @@ async def test_run_executes_multiple_sequential_tool_calls() -> None:
                         "arguments": '{"value":"world"}',
                     },
                 ],
-                raw_response={"id": "resp_1"},
             ),
             ProviderResponse(
-                response_id="resp_2",
                 output_text="pong: hello / WORLD",
-                output_items=[],
-                raw_response={"id": "resp_2"},
             ),
         ]
     )
@@ -1079,7 +982,6 @@ async def test_parallel_tool_batch_executes_concurrently_when_enabled() -> None:
     provider = FakeProvider(
         [
             ProviderResponse(
-                response_id="resp_1",
                 tool_calls=[
                     {
                         "call_id": "call_1",
@@ -1094,14 +996,9 @@ async def test_parallel_tool_batch_executes_concurrently_when_enabled() -> None:
                         "raw_arguments": '{"message":"beta"}',
                     },
                 ],
-                output_items=[],
-                raw_response={"id": "resp_1"},
             ),
             ProviderResponse(
-                response_id="resp_2",
                 output_text="done",
-                output_items=[],
-                raw_response={"id": "resp_2"},
             ),
         ]
     )
@@ -1129,7 +1026,6 @@ async def test_parallel_tool_batch_remains_sequential_by_default() -> None:
     provider = FakeProvider(
         [
             ProviderResponse(
-                response_id="resp_1",
                 tool_calls=[
                     {
                         "call_id": "call_1",
@@ -1144,14 +1040,9 @@ async def test_parallel_tool_batch_remains_sequential_by_default() -> None:
                         "raw_arguments": '{"message":"beta"}',
                     },
                 ],
-                output_items=[],
-                raw_response={"id": "resp_1"},
             ),
             ProviderResponse(
-                response_id="resp_2",
                 output_text="done",
-                output_items=[],
-                raw_response={"id": "resp_2"},
             ),
         ]
     )
@@ -1175,7 +1066,6 @@ async def test_tool_timeout_raises_for_slow_async_tool() -> None:
     provider = FakeProvider(
         [
             ProviderResponse(
-                response_id="resp_1",
                 tool_calls=[
                     {
                         "call_id": "call_1",
@@ -1184,8 +1074,6 @@ async def test_tool_timeout_raises_for_slow_async_tool() -> None:
                         "raw_arguments": '{"message":"hello"}',
                     }
                 ],
-                output_items=[],
-                raw_response={"id": "resp_1"},
             )
         ]
     )
@@ -1207,7 +1095,6 @@ async def test_no_tool_timeout_preserves_slow_async_tool_behavior() -> None:
     provider = FakeProvider(
         [
             ProviderResponse(
-                response_id="resp_1",
                 tool_calls=[
                     {
                         "call_id": "call_1",
@@ -1216,14 +1103,9 @@ async def test_no_tool_timeout_preserves_slow_async_tool_behavior() -> None:
                         "raw_arguments": '{"message":"hello"}',
                     }
                 ],
-                output_items=[],
-                raw_response={"id": "resp_1"},
             ),
             ProviderResponse(
-                response_id="resp_2",
                 output_text="done",
-                output_items=[],
-                raw_response={"id": "resp_2"},
             ),
         ]
     )
@@ -1244,7 +1126,6 @@ async def test_tool_timeout_raises_for_slow_sync_tool() -> None:
     provider = FakeProvider(
         [
             ProviderResponse(
-                response_id="resp_1",
                 tool_calls=[
                     {
                         "call_id": "call_1",
@@ -1253,8 +1134,6 @@ async def test_tool_timeout_raises_for_slow_sync_tool() -> None:
                         "raw_arguments": '{"message":"hello"}',
                     }
                 ],
-                output_items=[],
-                raw_response={"id": "resp_1"},
             )
         ]
     )
@@ -1276,7 +1155,6 @@ async def test_parallel_tool_batch_timeout_fails_run() -> None:
     provider = FakeProvider(
         [
             ProviderResponse(
-                response_id="resp_1",
                 tool_calls=[
                     {
                         "call_id": "call_1",
@@ -1291,8 +1169,6 @@ async def test_parallel_tool_batch_timeout_fails_run() -> None:
                         "raw_arguments": '{"message":"beta"}',
                     },
                 ],
-                output_items=[],
-                raw_response={"id": "resp_1"},
             )
         ]
     )
@@ -1311,7 +1187,6 @@ async def test_max_turns_exceeded_raises_error() -> None:
     provider = FakeProvider(
         [
             ProviderResponse(
-                response_id="resp_1",
                 tool_calls=[
                     {
                         "call_id": "call_1",
@@ -1320,8 +1195,6 @@ async def test_max_turns_exceeded_raises_error() -> None:
                         "raw_arguments": '{"message":"again"}',
                     }
                 ],
-                output_items=[],
-                raw_response={"id": "resp_1"},
             )
         ]
     )
@@ -1340,7 +1213,6 @@ async def test_tool_errors_surface_as_tool_execution_errors() -> None:
     provider = FakeProvider(
         [
             ProviderResponse(
-                response_id="resp_1",
                 tool_calls=[
                     {
                         "call_id": "call_1",
@@ -1349,8 +1221,6 @@ async def test_tool_errors_surface_as_tool_execution_errors() -> None:
                         "raw_arguments": '{"message":"boom"}',
                     }
                 ],
-                output_items=[],
-                raw_response={"id": "resp_1"},
             )
         ]
     )
@@ -1365,7 +1235,6 @@ async def test_sync_tool_definition_executes_successfully() -> None:
     provider = FakeProvider(
         [
             ProviderResponse(
-                response_id="resp_1",
                 output_text="",
                 tool_calls=[
                     {
@@ -1375,14 +1244,9 @@ async def test_sync_tool_definition_executes_successfully() -> None:
                         "raw_arguments": '{"message":"hello"}',
                     }
                 ],
-                output_items=[],
-                raw_response={"id": "resp_1"},
             ),
             ProviderResponse(
-                response_id="resp_2",
                 output_text="done",
-                output_items=[],
-                raw_response={"id": "resp_2"},
             ),
         ]
     )
@@ -1398,7 +1262,6 @@ async def test_sync_tool_errors_surface_as_tool_execution_errors() -> None:
     provider = FakeProvider(
         [
             ProviderResponse(
-                response_id="resp_1",
                 tool_calls=[
                     {
                         "call_id": "call_1",
@@ -1407,8 +1270,6 @@ async def test_sync_tool_errors_surface_as_tool_execution_errors() -> None:
                         "raw_arguments": '{"message":"boom"}',
                     }
                 ],
-                output_items=[],
-                raw_response={"id": "resp_1"},
             )
         ]
     )
@@ -1424,11 +1285,8 @@ async def test_run_returns_structured_output_without_tools() -> None:
     provider = FakeProvider(
         [
             ProviderResponse(
-                response_id="resp_1",
                 output_text='{"name":"Sarah","age":29}',
                 output_data=person,
-                output_items=[],
-                raw_response={"id": "resp_1"},
             )
         ]
     )
@@ -1450,11 +1308,8 @@ async def test_run_supports_structured_output_with_image_input() -> None:
     provider = FakeProvider(
         [
             ProviderResponse(
-                response_id="resp_1",
                 output_text='{"name":"Sarah","age":29}',
                 output_data=person,
-                output_items=[],
-                raw_response={"id": "resp_1"},
             )
         ]
     )
@@ -1497,7 +1352,6 @@ async def test_run_returns_structured_output_after_tool_call() -> None:
     provider = FakeProvider(
         [
             ProviderResponse(
-                response_id="resp_1",
                 tool_calls=[
                     {
                         "call_id": "call_1",
@@ -1514,14 +1368,10 @@ async def test_run_returns_structured_output_after_tool_call() -> None:
                         "arguments": '{"message":"weather"}',
                     }
                 ],
-                raw_response={"id": "resp_1"},
             ),
             ProviderResponse(
-                response_id="resp_2",
                 output_text='{"city":"San Francisco","temperature_f":65,"summary":"Foggy"}',
                 output_data=weather,
-                output_items=[],
-                raw_response={"id": "resp_2"},
             ),
         ]
     )
@@ -1544,7 +1394,6 @@ async def test_parallel_tool_batch_supports_structured_output_after_tools() -> N
     provider = FakeProvider(
         [
             ProviderResponse(
-                response_id="resp_1",
                 tool_calls=[
                     {
                         "call_id": "call_1",
@@ -1559,15 +1408,10 @@ async def test_parallel_tool_batch_supports_structured_output_after_tools() -> N
                         "raw_arguments": '{"message":"beta"}',
                     },
                 ],
-                output_items=[],
-                raw_response={"id": "resp_1"},
             ),
             ProviderResponse(
-                response_id="resp_2",
                 output_text='{"city":"San Francisco","temperature_f":65,"summary":"Foggy"}',
                 output_data=weather,
-                output_items=[],
-                raw_response={"id": "resp_2"},
             ),
         ]
     )
@@ -1593,7 +1437,6 @@ async def test_parallel_tool_batch_failure_fails_run() -> None:
     provider = FakeProvider(
         [
             ProviderResponse(
-                response_id="resp_1",
                 tool_calls=[
                     {
                         "call_id": "call_1",
@@ -1608,8 +1451,6 @@ async def test_parallel_tool_batch_failure_fails_run() -> None:
                         "raw_arguments": '{"message":"boom"}',
                     },
                 ],
-                output_items=[],
-                raw_response={"id": "resp_1"},
             )
         ]
     )
@@ -1628,7 +1469,6 @@ async def test_run_supports_tool_calls_with_system_prompt() -> None:
     provider = FakeProvider(
         [
             ProviderResponse(
-                response_id="resp_1",
                 output_text="",
                 tool_calls=[
                     {
@@ -1646,13 +1486,9 @@ async def test_run_supports_tool_calls_with_system_prompt() -> None:
                         "arguments": '{"message":"hello"}',
                     }
                 ],
-                raw_response={"id": "resp_1"},
             ),
             ProviderResponse(
-                response_id="resp_2",
                 output_text="The tool said pong: hello",
-                output_items=[],
-                raw_response={"id": "resp_2"},
             ),
         ]
     )
@@ -1704,7 +1540,6 @@ async def test_chat_session_preserves_conversation_history() -> None:
     provider = FakeProvider(
         [
             ProviderResponse(
-                response_id="resp_1",
                 output_text="Your name is Anson.",
                 output_items=[
                     {
@@ -1713,10 +1548,8 @@ async def test_chat_session_preserves_conversation_history() -> None:
                         "content": [{"type": "output_text", "text": "Your name is Anson."}],
                     }
                 ],
-                raw_response={"id": "resp_1"},
             ),
             ProviderResponse(
-                response_id="resp_2",
                 output_text="You told me your name is Anson.",
                 output_items=[
                     {
@@ -1725,7 +1558,6 @@ async def test_chat_session_preserves_conversation_history() -> None:
                         "content": [{"type": "output_text", "text": "You told me your name is Anson."}],
                     }
                 ],
-                raw_response={"id": "resp_2"},
             ),
         ]
     )
@@ -1767,7 +1599,6 @@ async def test_chat_session_uses_default_system_prompt_without_leaking_into_hist
     provider = FakeProvider(
         [
             ProviderResponse(
-                response_id="resp_1",
                 output_text="Stored.",
                 output_items=[
                     {
@@ -1776,10 +1607,8 @@ async def test_chat_session_uses_default_system_prompt_without_leaking_into_hist
                         "content": [{"type": "output_text", "text": "Stored."}],
                     }
                 ],
-                raw_response={"id": "resp_1"},
             ),
             ProviderResponse(
-                response_id="resp_2",
                 output_text="You said Anson.",
                 output_items=[
                     {
@@ -1788,7 +1617,6 @@ async def test_chat_session_uses_default_system_prompt_without_leaking_into_hist
                         "content": [{"type": "output_text", "text": "You said Anson."}],
                     }
                 ],
-                raw_response={"id": "resp_2"},
             ),
         ]
     )
@@ -1825,7 +1653,6 @@ async def test_chat_session_run_level_system_prompt_overrides_for_one_call_only(
     provider = FakeProvider(
         [
             ProviderResponse(
-                response_id="resp_1",
                 output_text="First",
                 output_items=[
                     {
@@ -1834,10 +1661,8 @@ async def test_chat_session_run_level_system_prompt_overrides_for_one_call_only(
                         "content": [{"type": "output_text", "text": "First"}],
                     }
                 ],
-                raw_response={"id": "resp_1"},
             ),
             ProviderResponse(
-                response_id="resp_2",
                 output_text="Second",
                 output_items=[
                     {
@@ -1846,7 +1671,6 @@ async def test_chat_session_run_level_system_prompt_overrides_for_one_call_only(
                         "content": [{"type": "output_text", "text": "Second"}],
                     }
                 ],
-                raw_response={"id": "resp_2"},
             ),
         ]
     )
@@ -1873,7 +1697,6 @@ async def test_chat_session_preserves_multimodal_history() -> None:
     provider = FakeProvider(
         [
             ProviderResponse(
-                response_id="resp_1",
                 output_text="Stored the image.",
                 output_items=[
                     {
@@ -1882,10 +1705,8 @@ async def test_chat_session_preserves_multimodal_history() -> None:
                         "content": [{"type": "output_text", "text": "Stored the image."}],
                     }
                 ],
-                raw_response={"id": "resp_1"},
             ),
             ProviderResponse(
-                response_id="resp_2",
                 output_text="The image showed a cat.",
                 output_items=[
                     {
@@ -1894,7 +1715,6 @@ async def test_chat_session_preserves_multimodal_history() -> None:
                         "content": [{"type": "output_text", "text": "The image showed a cat."}],
                     }
                 ],
-                raw_response={"id": "resp_2"},
             ),
         ]
     )
@@ -2005,7 +1825,6 @@ async def test_hosted_tools_are_passed_through_to_provider() -> None:
     provider = FakeProvider(
         [
             ProviderResponse(
-                response_id="resp_1",
                 output_text="search done",
                 output_items=[
                     {
@@ -2014,7 +1833,6 @@ async def test_hosted_tools_are_passed_through_to_provider() -> None:
                         "content": [{"type": "output_text", "text": "search done"}],
                     }
                 ],
-                raw_response={"id": "resp_1"},
             )
         ]
     )
@@ -2035,10 +1853,7 @@ async def test_hosted_tools_coexist_with_local_tools() -> None:
     provider = FakeProvider(
         [
             ProviderResponse(
-                response_id="resp_1",
                 output_text="ok",
-                output_items=[],
-                raw_response={"id": "resp_1"},
             )
         ]
     )
@@ -2103,7 +1918,6 @@ async def test_hosted_tool_only_response_terminates_loop_cleanly() -> None:
     provider = FakeProvider(
         [
             ProviderResponse(
-                response_id="resp_1",
                 output_text="Python 3.13 added free-threaded mode.",
                 output_items=[
                     {
@@ -2122,7 +1936,6 @@ async def test_hosted_tool_only_response_terminates_loop_cleanly() -> None:
                         ],
                     },
                 ],
-                raw_response={"id": "resp_1"},
             )
         ]
     )
@@ -2146,10 +1959,7 @@ async def test_hosted_tools_dicts_are_copied_not_shared() -> None:
     provider = FakeProvider(
         [
             ProviderResponse(
-                response_id="resp_1",
                 output_text="ok",
-                output_items=[],
-                raw_response={"id": "resp_1"},
             )
         ]
     )

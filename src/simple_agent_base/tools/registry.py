@@ -41,7 +41,7 @@ class ToolRegistry:
                 "name": definition.name,
                 "description": definition.description,
                 "parameters": definition.parameters,
-                "strict": definition.strict,
+                "strict": True,
             }
             for definition in self._definitions.values()
         ]

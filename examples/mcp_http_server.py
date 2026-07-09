@@ -16,6 +16,8 @@ import socket
 import subprocess
 import sys
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 from simple_agent_base import Agent, AgentConfig, MCPApprovalRequest, MCPServer
@@ -43,52 +45,40 @@ def _wait_for_server(host: str, port: int) -> None:
     raise RuntimeError(f"HTTP MCP fixture did not start: {last_error}")
 
 
-class DemoHTTPServer:
-    def __init__(self) -> None:
-        self.port = _free_port()
-        self.url = f"http://127.0.0.1:{self.port}/mcp"
-        self._process: subprocess.Popen[bytes] | None = None
-
-    def start(self) -> None:
-        self._process = subprocess.Popen(
-            [sys.executable, str(FIXTURE_SERVER), "http", str(self.port)],
-            cwd=str(FIXTURE_SERVER.parent.parent.parent),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        _wait_for_server("127.0.0.1", self.port)
-
-    def stop(self) -> None:
-        if self._process is None:
-            return
-
-        self._process.terminate()
+@contextmanager
+def demo_http_server() -> Iterator[str]:
+    port = _free_port()
+    process = subprocess.Popen(
+        [sys.executable, str(FIXTURE_SERVER), "http", str(port)],
+        cwd=str(FIXTURE_SERVER.parent.parent.parent),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        _wait_for_server("127.0.0.1", port)
+        yield f"http://127.0.0.1:{port}/mcp"
+    finally:
+        process.terminate()
         try:
-            self._process.wait(timeout=5)
+            process.wait(timeout=5)
         except subprocess.TimeoutExpired:
-            self._process.kill()
-            self._process.wait(timeout=5)
-        finally:
-            self._process = None
+            process.kill()
+            process.wait(timeout=5)
 
 
 async def basic_http_mcp_run() -> None:
-    server = DemoHTTPServer()
-    server.start()
-    try:
+    with demo_http_server() as server_url:
         async with Agent(
             config=AgentConfig(model=os.environ.get("OPENAI_MODEL", "gpt-5")),
-            mcp_servers=[MCPServer.http(name="demohttp", url=server.url)],
+            mcp_servers=[MCPServer.http(name="demohttp", url=server_url)],
         ) as agent:
             result = await agent.run(
                 "Use the demohttp MCP add tool with 2 and 3, "
                 "then reply with one short sentence that includes the result."
             )
-    finally:
-        server.stop()
 
     print("=== Server URL ===")
-    print(server.url)
+    print(server_url)
     print()
     print("=== Model output ===")
     print(result.output_text)
@@ -103,20 +93,16 @@ async def http_mcp_run_with_approvals() -> None:
         print(f"[approval] {request.server_name}.{request.name}({request.arguments})")
         return True
 
-    server = DemoHTTPServer()
-    server.start()
-    try:
+    with demo_http_server() as server_url:
         async with Agent(
             config=AgentConfig(model=os.environ.get("OPENAI_MODEL", "gpt-5")),
-            mcp_servers=[MCPServer.http(name="demohttp", url=server.url, require_approval=True)],
+            mcp_servers=[MCPServer.http(name="demohttp", url=server_url, require_approval=True)],
             approval_handler=approve,
         ) as agent:
             result = await agent.run(
                 "Use the demohttp MCP echo tool with the message 'hello over HTTP', "
                 "then reply with one short sentence that includes the tool result."
             )
-    finally:
-        server.stop()
 
     print("=== With-approval output ===")
     print(result.output_text)

@@ -19,10 +19,7 @@ from simple_agent_base.types import (
 def clean_system_prompt(system_prompt: str | None) -> str | None:
     if system_prompt is None:
         return None
-    cleaned = system_prompt.strip()
-    if not cleaned:
-        return None
-    return cleaned
+    return system_prompt.strip() or None
 
 
 def normalize_input(input_data: str | Sequence[MessageInput]) -> list[ConversationItem]:
@@ -48,7 +45,12 @@ def build_transcript(
 ) -> list[ConversationItem]:
     transcript = list(prefix_items or [])
     transcript.extend(normalize_input(input_data))
-    return prepend_system_prompt(transcript, system_prompt=system_prompt)
+    if system_prompt is None:
+        return transcript
+    return [
+        message_to_item(ChatMessage(role="developer", content=system_prompt)),
+        *transcript,
+    ]
 
 
 def persist_chat_items(
@@ -56,7 +58,12 @@ def persist_chat_items(
     *,
     system_prompt: str | None,
 ) -> list[ConversationItem]:
-    return persistable_items(strip_prepended_system_prompt(transcript, system_prompt=system_prompt))
+    items = list(transcript)
+    if system_prompt is not None:
+        expected_item = message_to_item(ChatMessage(role="developer", content=system_prompt))
+        if items and items[0] == expected_item:
+            items = items[1:]
+    return [item for item in items if item.get("type") == "message"]
 
 
 def user_message(prompt: str) -> ConversationItem:
@@ -69,39 +76,6 @@ def tool_output_item(result: ToolExecutionResult) -> ConversationItem:
         "call_id": result.call_id,
         "output": result.output,
     }
-
-
-def prepend_system_prompt(
-    items: list[ConversationItem],
-    *,
-    system_prompt: str | None,
-) -> list[ConversationItem]:
-    if system_prompt is None:
-        return list(items)
-
-    return [
-        message_to_item(ChatMessage(role="developer", content=system_prompt)),
-        *items,
-    ]
-
-
-def strip_prepended_system_prompt(
-    items: Sequence[ConversationItem],
-    *,
-    system_prompt: str | None,
-) -> list[ConversationItem]:
-    if system_prompt is None:
-        return list(items)
-
-    expected_item = message_to_item(ChatMessage(role="developer", content=system_prompt))
-    result = list(items)
-    if result and result[0] == expected_item:
-        return result[1:]
-    return result
-
-
-def persistable_items(items: Sequence[ConversationItem]) -> list[ConversationItem]:
-    return [item for item in items if item.get("type") == "message"]
 
 
 def message_to_item(message: ChatMessage) -> ConversationItem:
@@ -118,14 +92,7 @@ def message_to_item(message: ChatMessage) -> ConversationItem:
 
 
 def messages_from_items(items: Sequence[ConversationItem]) -> list[ChatMessage]:
-    messages: list[ChatMessage] = []
-
-    for item in items:
-        message = message_from_item(item)
-        if message is not None:
-            messages.append(message)
-
-    return messages
+    return [message for item in items if (message := message_from_item(item)) is not None]
 
 
 def message_from_item(item: ConversationItem) -> ChatMessage | None:
@@ -156,7 +123,6 @@ def message_content_from_item(
 
 
 def _content_from_blocks(blocks: list[object]) -> str | list[TextPart | ImagePart | FilePart] | None:
-    text_parts: list[str] = []
     content_parts: list[TextPart | ImagePart | FilePart] = []
     saw_rich_content = False
 
@@ -168,45 +134,34 @@ def _content_from_blocks(blocks: list[object]) -> str | list[TextPart | ImagePar
         if block_type in {"input_text", "output_text"}:
             text = block.get("text")
             if isinstance(text, str):
-                text_parts.append(text)
                 content_parts.append(TextPart(text))
         elif block_type == "input_image":
-            image = _image_part_from_block(block)
-            if image is not None:
-                content_parts.append(image)
+            image_url = block.get("image_url")
+            detail = block.get("detail", "auto")
+            if isinstance(image_url, str) and isinstance(detail, str):
+                content_parts.append(ImagePart(image_url=image_url, detail=detail))
                 saw_rich_content = True
         elif block_type == "input_file":
-            file_part = _file_part_from_block(block)
-            if file_part is not None:
+            try:
+                file_part = FilePart.model_validate(
+                    {
+                        "file_url": block.get("file_url"),
+                        "file_data": block.get("file_data"),
+                        "filename": block.get("filename"),
+                    }
+                )
+            except ValidationError:
+                pass
+            else:
                 content_parts.append(file_part)
                 saw_rich_content = True
 
     if saw_rich_content and content_parts:
         return content_parts
-    if text_parts:
-        return "".join(text_parts)
+    text = "".join(part.text for part in content_parts if isinstance(part, TextPart))
+    if text:
+        return text
     return None
-
-
-def _image_part_from_block(block: JSONObject) -> ImagePart | None:
-    image_url = block.get("image_url")
-    detail = block.get("detail", "auto")
-    if isinstance(image_url, str) and isinstance(detail, str):
-        return ImagePart(image_url=image_url, detail=detail)
-    return None
-
-
-def _file_part_from_block(block: JSONObject) -> FilePart | None:
-    file_payload = {
-        "file_url": block.get("file_url"),
-        "file_data": block.get("file_data"),
-        "filename": block.get("filename"),
-    }
-    try:
-        return FilePart.model_validate(file_payload)
-    except ValidationError:
-        return None
-
 
 def content_part_to_item(part: TextPart | ImagePart | FilePart) -> JSONObject:
     if isinstance(part, TextPart):

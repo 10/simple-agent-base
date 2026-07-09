@@ -5,72 +5,25 @@ import socket
 import subprocess
 import sys
 import time
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 from mcp import types as mcp_types
-from pydantic import BaseModel, ValidationError
+from pydantic import ValidationError
 
+from conftest import FakeProvider
 from simple_agent_base import Agent, AgentConfig, MCPServer, tool
 from simple_agent_base.errors import MCPApprovalRequiredError, ToolExecutionError, ToolRegistrationError
 from simple_agent_base.mcp import normalize_mcp_tool_result
-from simple_agent_base.providers.base import ProviderCompletedEvent, ProviderEvent, ProviderResponse
-from simple_agent_base.types import ConversationItem
+from simple_agent_base.providers.base import ProviderCompletedEvent, ProviderResponse
 import simple_agent_base.mcp as mcp_module
 
 FIXTURE_SERVER = Path(__file__).parent / "fixtures" / "mcp_demo_server.py"
-
-
-class FakeProvider:
-    def __init__(
-        self,
-        responses: list[ProviderResponse] | None = None,
-        stream_sequences: list[list[ProviderEvent]] | None = None,
-    ) -> None:
-        self.responses = list(responses or [])
-        self.stream_sequences = list(stream_sequences or [])
-        self.calls: list[dict[str, Any]] = []
-        self.stream_calls: list[dict[str, Any]] = []
-
-    async def create_response(
-        self,
-        *,
-        input_items: Sequence[ConversationItem],
-        tools: Sequence[dict[str, Any]],
-        response_model: type[BaseModel] | None = None,
-    ) -> ProviderResponse:
-        self.calls.append(
-            {
-                "input_items": list(input_items),
-                "tools": list(tools),
-                "response_model": response_model,
-            }
-        )
-        return self.responses.pop(0)
-
-    async def stream_response(
-        self,
-        *,
-        input_items: Sequence[ConversationItem],
-        tools: Sequence[dict[str, Any]],
-        response_model: type[BaseModel] | None = None,
-    ) -> AsyncIterator[ProviderEvent]:
-        self.stream_calls.append(
-            {
-                "input_items": list(input_items),
-                "tools": list(tools),
-                "response_model": response_model,
-            }
-        )
-        for event in self.stream_sequences.pop(0):
-            yield event
-
-    async def close(self) -> None:
-        return None
 
 
 @pytest.fixture
@@ -187,7 +140,6 @@ async def test_agent_discovers_and_executes_stdio_mcp_tool(stdio_server: MCPServ
     provider = FakeProvider(
         responses=[
             ProviderResponse(
-                response_id="resp_1",
                 tool_calls=[
                     {
                         "call_id": "call_1",
@@ -196,14 +148,9 @@ async def test_agent_discovers_and_executes_stdio_mcp_tool(stdio_server: MCPServ
                         "raw_arguments": '{"message":"hello"}',
                     }
                 ],
-                output_items=[],
-                raw_response={"id": "resp_1"},
             ),
             ProviderResponse(
-                response_id="resp_2",
                 output_text="done",
-                output_items=[],
-                raw_response={"id": "resp_2"},
             ),
         ]
     )
@@ -236,10 +183,7 @@ async def test_agent_filters_allowed_mcp_tools(stdio_server: MCPServer) -> None:
     provider = FakeProvider(
         responses=[
             ProviderResponse(
-                response_id="resp_1",
                 output_text="done",
-                output_items=[],
-                raw_response={"id": "resp_1"},
             )
         ]
     )
@@ -264,10 +208,7 @@ async def test_agent_with_empty_mcp_allowlist_exposes_no_tools(stdio_server: MCP
     provider = FakeProvider(
         responses=[
             ProviderResponse(
-                response_id="resp_1",
                 output_text="done",
-                output_items=[],
-                raw_response={"id": "resp_1"},
             )
         ]
     )
@@ -294,6 +235,43 @@ def test_agent_rejects_duplicate_mcp_server_names(stdio_server: MCPServer) -> No
             provider=FakeProvider(),
             mcp_servers=[stdio_server, duplicate],
         )
+
+
+@pytest.mark.asyncio
+async def test_mcp_manager_rejects_duplicate_namespaced_tool_names() -> None:
+    class FakeBridge:
+        def __init__(self, tool: mcp_module.MCPToolDefinition) -> None:
+            self._tool = tool
+
+        async def list_tools(self) -> list[mcp_module.MCPToolDefinition]:
+            return [self._tool]
+
+    manager = mcp_module.MCPBridgeManager()
+    manager._bridges = {
+        "alpha": FakeBridge(
+            mcp_module.MCPToolDefinition(
+                server_name="alpha",
+                tool_name="beta__gamma",
+                namespaced_name="alpha__beta__gamma",
+                description="First tool",
+                parameters={"type": "object"},
+                require_approval=False,
+            )
+        ),
+        "alpha__beta": FakeBridge(
+            mcp_module.MCPToolDefinition(
+                server_name="alpha__beta",
+                tool_name="gamma",
+                namespaced_name="alpha__beta__gamma",
+                description="Second tool",
+                parameters={"type": "object"},
+                require_approval=False,
+            )
+        ),
+    }
+
+    with pytest.raises(ToolRegistrationError, match="MCP tool 'alpha__beta__gamma' is already registered"):
+        await manager.ensure_initialized()
 
 
 @pytest.mark.asyncio
@@ -344,7 +322,6 @@ async def test_agent_approval_handler_can_deny_mcp_call(stdio_server: MCPServer)
     provider = FakeProvider(
         responses=[
             ProviderResponse(
-                response_id="resp_1",
                 tool_calls=[
                     {
                         "call_id": "call_1",
@@ -353,14 +330,9 @@ async def test_agent_approval_handler_can_deny_mcp_call(stdio_server: MCPServer)
                         "raw_arguments": '{"message":"hello"}',
                     }
                 ],
-                output_items=[],
-                raw_response={"id": "resp_1"},
             ),
             ProviderResponse(
-                response_id="resp_2",
                 output_text="handled",
-                output_items=[],
-                raw_response={"id": "resp_2"},
             ),
         ]
     )
@@ -386,7 +358,6 @@ async def test_agent_requires_approval_handler_for_gated_mcp_call(stdio_server: 
     provider = FakeProvider(
         responses=[
             ProviderResponse(
-                response_id="resp_1",
                 tool_calls=[
                     {
                         "call_id": "call_1",
@@ -395,8 +366,6 @@ async def test_agent_requires_approval_handler_for_gated_mcp_call(stdio_server: 
                         "raw_arguments": '{"message":"hello"}',
                     }
                 ],
-                output_items=[],
-                raw_response={"id": "resp_1"},
             )
         ]
     )
@@ -418,7 +387,6 @@ async def test_agent_surfaces_mcp_error_results_as_tool_failures(stdio_server: M
     provider = FakeProvider(
         responses=[
             ProviderResponse(
-                response_id="resp_1",
                 tool_calls=[
                     {
                         "call_id": "call_1",
@@ -427,8 +395,6 @@ async def test_agent_surfaces_mcp_error_results_as_tool_failures(stdio_server: M
                         "raw_arguments": '{"message":"boom"}',
                     }
                 ],
-                output_items=[],
-                raw_response={"id": "resp_1"},
             )
         ]
     )
@@ -452,7 +418,6 @@ async def test_stream_emits_local_mcp_events(stdio_server: MCPServer) -> None:
             [
                 ProviderCompletedEvent(
                     response=ProviderResponse(
-                        response_id="resp_1",
                         tool_calls=[
                             {
                                 "call_id": "call_1",
@@ -461,18 +426,13 @@ async def test_stream_emits_local_mcp_events(stdio_server: MCPServer) -> None:
                                 "raw_arguments": '{"message":"hello"}',
                             }
                         ],
-                        output_items=[],
-                        raw_response={"id": "resp_1"},
                     )
                 )
             ],
             [
                 ProviderCompletedEvent(
                     response=ProviderResponse(
-                        response_id="resp_2",
                         output_text="done",
-                        output_items=[],
-                        raw_response={"id": "resp_2"},
                     )
                 )
             ],
@@ -517,7 +477,6 @@ async def test_stream_yields_mcp_approval_request_before_waiting_for_handler(
             [
                 ProviderCompletedEvent(
                     response=ProviderResponse(
-                        response_id="resp_1",
                         tool_calls=[
                             {
                                 "call_id": "call_1",
@@ -526,18 +485,13 @@ async def test_stream_yields_mcp_approval_request_before_waiting_for_handler(
                                 "raw_arguments": '{"message":"hello"}',
                             }
                         ],
-                        output_items=[],
-                        raw_response={"id": "resp_1"},
                     )
                 )
             ],
             [
                 ProviderCompletedEvent(
                     response=ProviderResponse(
-                        response_id="resp_2",
                         output_text="done",
-                        output_items=[],
-                        raw_response={"id": "resp_2"},
                     )
                 )
             ],
@@ -555,19 +509,13 @@ async def test_stream_yields_mcp_approval_request_before_waiting_for_handler(
     )
     fake_tool = SimpleNamespace(server_name="demo", tool_name="echo", require_approval=True)
 
-    async def fake_ready() -> None:
-        return None
-
-    async def fake_call_tool(*, namespaced_name: str, arguments: dict[str, Any]) -> tuple[Any, Any]:
-        return (
-            fake_tool,
-            mcp_types.CallToolResult(
-                content=[mcp_types.TextContent(type="text", text="echo:hello")],
-                isError=False,
-            ),
+    async def fake_call_tool(*, namespaced_name: str, arguments: dict[str, Any]) -> mcp_types.CallToolResult:
+        return mcp_types.CallToolResult(
+            content=[mcp_types.TextContent(type="text", text="echo:hello")],
+            isError=False,
         )
 
-    monkeypatch.setattr(agent, "_ensure_mcp_ready", fake_ready)
+    monkeypatch.setattr(agent, "_ensure_mcp_ready", AsyncMock())
     monkeypatch.setattr(agent._mcp_manager, "has_tool", lambda name: name == "demo__echo")
     monkeypatch.setattr(agent._mcp_manager, "get_tool", lambda name: fake_tool)
     monkeypatch.setattr(agent._mcp_manager, "call_tool", fake_call_tool)
@@ -599,7 +547,6 @@ async def test_stream_does_not_emit_mcp_started_when_approval_is_denied(
             [
                 ProviderCompletedEvent(
                     response=ProviderResponse(
-                        response_id="resp_1",
                         tool_calls=[
                             {
                                 "call_id": "call_1",
@@ -608,18 +555,13 @@ async def test_stream_does_not_emit_mcp_started_when_approval_is_denied(
                                 "raw_arguments": '{"message":"hello"}',
                             }
                         ],
-                        output_items=[],
-                        raw_response={"id": "resp_1"},
                     )
                 )
             ],
             [
                 ProviderCompletedEvent(
                     response=ProviderResponse(
-                        response_id="resp_2",
                         output_text="handled",
-                        output_items=[],
-                        raw_response={"id": "resp_2"},
                     )
                 )
             ],
@@ -632,10 +574,7 @@ async def test_stream_does_not_emit_mcp_started_when_approval_is_denied(
     )
     fake_tool = SimpleNamespace(server_name="demo", tool_name="echo", require_approval=True)
 
-    async def fake_ready() -> None:
-        return None
-
-    monkeypatch.setattr(agent, "_ensure_mcp_ready", fake_ready)
+    monkeypatch.setattr(agent, "_ensure_mcp_ready", AsyncMock())
     monkeypatch.setattr(agent._mcp_manager, "has_tool", lambda name: name == "demo__echo")
     monkeypatch.setattr(agent._mcp_manager, "get_tool", lambda name: fake_tool)
 
@@ -663,10 +602,7 @@ async def test_agent_rejects_conflicting_local_and_mcp_tool_names(stdio_server: 
     provider = FakeProvider(
         responses=[
             ProviderResponse(
-                response_id="resp_1",
                 output_text="done",
-                output_items=[],
-                raw_response={"id": "resp_1"},
             )
         ]
     )
@@ -689,7 +625,6 @@ async def test_agent_executes_streamable_http_mcp_tool(http_server: str) -> None
     provider = FakeProvider(
         responses=[
             ProviderResponse(
-                response_id="resp_1",
                 tool_calls=[
                     {
                         "call_id": "call_1",
@@ -698,14 +633,9 @@ async def test_agent_executes_streamable_http_mcp_tool(http_server: str) -> None
                         "raw_arguments": '{"a":2,"b":3}',
                     }
                 ],
-                output_items=[],
-                raw_response={"id": "resp_1"},
             ),
             ProviderResponse(
-                response_id="resp_2",
                 output_text="done",
-                output_items=[],
-                raw_response={"id": "resp_2"},
             ),
         ]
     )
@@ -732,7 +662,6 @@ async def test_agent_wraps_mcp_transport_errors_as_tool_failures(
     provider = FakeProvider(
         responses=[
             ProviderResponse(
-                response_id="resp_1",
                 tool_calls=[
                     {
                         "call_id": "call_1",
@@ -741,8 +670,6 @@ async def test_agent_wraps_mcp_transport_errors_as_tool_failures(
                         "raw_arguments": '{"message":"hello"}',
                     }
                 ],
-                output_items=[],
-                raw_response={"id": "resp_1"},
             )
         ]
     )
@@ -752,13 +679,10 @@ async def test_agent_wraps_mcp_transport_errors_as_tool_failures(
     )
     fake_tool = SimpleNamespace(server_name="demo", tool_name="echo", require_approval=False)
 
-    async def fake_ready() -> None:
-        return None
-
     async def broken_call_tool(*, namespaced_name: str, arguments: dict[str, Any]) -> Any:
         raise RuntimeError("transport dropped")
 
-    monkeypatch.setattr(agent, "_ensure_mcp_ready", fake_ready)
+    monkeypatch.setattr(agent, "_ensure_mcp_ready", AsyncMock())
     monkeypatch.setattr(agent._mcp_manager, "has_tool", lambda name: name == "demo__echo")
     monkeypatch.setattr(agent._mcp_manager, "get_tool", lambda name: fake_tool)
     monkeypatch.setattr(agent._mcp_manager, "call_tool", broken_call_tool)
@@ -775,7 +699,6 @@ async def test_agent_times_out_slow_mcp_tool_call(monkeypatch: pytest.MonkeyPatc
     provider = FakeProvider(
         responses=[
             ProviderResponse(
-                response_id="resp_1",
                 tool_calls=[
                     {
                         "call_id": "call_1",
@@ -784,8 +707,6 @@ async def test_agent_times_out_slow_mcp_tool_call(monkeypatch: pytest.MonkeyPatc
                         "raw_arguments": '{"message":"hello"}',
                     }
                 ],
-                output_items=[],
-                raw_response={"id": "resp_1"},
             )
         ]
     )
@@ -795,20 +716,14 @@ async def test_agent_times_out_slow_mcp_tool_call(monkeypatch: pytest.MonkeyPatc
     )
     fake_tool = SimpleNamespace(server_name="demo", tool_name="echo", require_approval=False)
 
-    async def fake_ready() -> None:
-        return None
-
     async def slow_call_tool(*, namespaced_name: str, arguments: dict[str, Any]) -> Any:
         await asyncio.sleep(0.2)
-        return (
-            fake_tool,
-            mcp_types.CallToolResult(
-                content=[mcp_types.TextContent(type="text", text="echo:hello")],
-                isError=False,
-            ),
+        return mcp_types.CallToolResult(
+            content=[mcp_types.TextContent(type="text", text="echo:hello")],
+            isError=False,
         )
 
-    monkeypatch.setattr(agent, "_ensure_mcp_ready", fake_ready)
+    monkeypatch.setattr(agent, "_ensure_mcp_ready", AsyncMock())
     monkeypatch.setattr(agent._mcp_manager, "has_tool", lambda name: name == "demo__echo")
     monkeypatch.setattr(agent._mcp_manager, "get_tool", lambda name: fake_tool)
     monkeypatch.setattr(agent._mcp_manager, "call_tool", slow_call_tool)
@@ -830,7 +745,6 @@ async def test_mcp_approval_time_is_excluded_from_tool_timeout(
     provider = FakeProvider(
         responses=[
             ProviderResponse(
-                response_id="resp_1",
                 tool_calls=[
                     {
                         "call_id": "call_1",
@@ -839,14 +753,9 @@ async def test_mcp_approval_time_is_excluded_from_tool_timeout(
                         "raw_arguments": '{"message":"hello"}',
                     }
                 ],
-                output_items=[],
-                raw_response={"id": "resp_1"},
             ),
             ProviderResponse(
-                response_id="resp_2",
                 output_text="done",
-                output_items=[],
-                raw_response={"id": "resp_2"},
             ),
         ]
     )
@@ -862,19 +771,13 @@ async def test_mcp_approval_time_is_excluded_from_tool_timeout(
         approval_handler=approve,
     )
 
-    async def fake_ready() -> None:
-        return None
-
     async def quick_call_tool(*, namespaced_name: str, arguments: dict[str, Any]) -> Any:
-        return (
-            fake_tool,
-            mcp_types.CallToolResult(
-                content=[mcp_types.TextContent(type="text", text="echo:hello")],
-                isError=False,
-            ),
+        return mcp_types.CallToolResult(
+            content=[mcp_types.TextContent(type="text", text="echo:hello")],
+            isError=False,
         )
 
-    monkeypatch.setattr(agent, "_ensure_mcp_ready", fake_ready)
+    monkeypatch.setattr(agent, "_ensure_mcp_ready", AsyncMock())
     monkeypatch.setattr(agent._mcp_manager, "has_tool", lambda name: name == "demo__echo")
     monkeypatch.setattr(agent._mcp_manager, "get_tool", lambda name: fake_tool)
     monkeypatch.setattr(agent._mcp_manager, "call_tool", quick_call_tool)
