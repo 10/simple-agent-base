@@ -90,7 +90,7 @@ REASONING_SUMMARY = "Checked the constraint."
 def make_provider(*, reasoning_effort: ReasoningEffort | None = None) -> OpenAIResponsesProvider:
     return OpenAIResponsesProvider(
         AgentConfig(
-            model="gpt-5.5",
+            model="gpt-5.6-sol",
             api_key="test-key",
             reasoning_effort=reasoning_effort,
         )

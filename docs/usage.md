@@ -37,7 +37,7 @@ Typical construction:
 from simple_agent_base import Agent, AgentConfig
 
 agent = Agent(
-    config=AgentConfig(model="gpt-5.5"),
+    config=AgentConfig(model="gpt-5.6-sol"),
     tools=[...],
     system_prompt="...",
 )
@@ -405,7 +405,7 @@ You can enable reasoning through `AgentConfig.reasoning_effort`.
 ```python
 agent = Agent(
     config=AgentConfig(
-        model="gpt-5.5",
+        model="gpt-5.6-sol",
         reasoning_effort="high",
     )
 )
@@ -429,7 +429,7 @@ Agent-level default:
 
 ```python
 agent = Agent(
-    config=AgentConfig(model="gpt-5.5"),
+    config=AgentConfig(model="gpt-5.6-sol"),
     system_prompt="You are concise and helpful.",
 )
 ```
@@ -566,7 +566,7 @@ The package is async-first, but it also supports synchronous programs.
 ### `run_sync(...)`
 
 ```python
-agent = Agent(config=AgentConfig(model="gpt-5.5"))
+agent = Agent(config=AgentConfig(model="gpt-5.6-sol"))
 
 try:
     result = agent.run_sync("Say hello.")
@@ -626,7 +626,7 @@ The built-in provider owns an `AsyncOpenAI` client, so explicit cleanup is the n
 
 ```python
 AgentConfig(
-    model="gpt-5.5",
+    model="gpt-5.6-sol",
     api_key=None,
     base_url=None,
     max_turns=8,

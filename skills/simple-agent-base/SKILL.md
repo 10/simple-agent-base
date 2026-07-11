@@ -99,7 +99,7 @@ async def ping(message: str) -> str:
 
 async def main() -> None:
     async with Agent(
-        config=AgentConfig(model="gpt-5.5"),
+        config=AgentConfig(model="gpt-5.6-sol"),
         tools=[ping],
         system_prompt="You are concise.",
     ) as agent:
@@ -115,7 +115,7 @@ asyncio.run(main())
 
 ```python
 AgentConfig(
-    model="gpt-5.5",
+    model="gpt-5.6-sol",
     api_key=None,
     base_url=None,
     max_turns=8,
@@ -144,7 +144,7 @@ Agent-level default:
 
 ```python
 async with Agent(
-    config=AgentConfig(model="gpt-5.5"),
+    config=AgentConfig(model="gpt-5.6-sol"),
     tools=[ping],
     system_prompt=(
         "You are a concise support agent. Use tools for account lookups, "
@@ -296,7 +296,7 @@ Hosted tools are provider-side tools. The library only validates and passes thei
 
 ```python
 agent = Agent(
-    config=AgentConfig(model="gpt-5.5"),
+    config=AgentConfig(model="gpt-5.6-sol"),
     hosted_tools=[{"type": "web_search"}],
 )
 ```
@@ -323,7 +323,7 @@ def approve(request: MCPApprovalRequest) -> bool:
 server_path = Path("tests/fixtures/mcp_demo_server.py").resolve()
 
 async with Agent(
-    config=AgentConfig(model="gpt-5.5"),
+    config=AgentConfig(model="gpt-5.6-sol"),
     mcp_servers=[
         MCPServer.stdio(
             name="demo",
@@ -346,7 +346,7 @@ MCP tools are exposed as `server__tool`, for example `demo__echo`. Name conflict
 from simple_agent_base import Agent, AgentConfig
 
 
-with Agent(config=AgentConfig(model="gpt-5.5")) as agent:
+with Agent(config=AgentConfig(model="gpt-5.6-sol")) as agent:
     result = agent.run_sync("Say hello.")
     print(result.output_text)
 ```

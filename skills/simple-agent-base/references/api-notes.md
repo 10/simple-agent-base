@@ -58,7 +58,7 @@ If `provider` is omitted, `OpenAIResponsesProvider(config)` is used.
 
 ```python
 AgentConfig(
-    model="gpt-5.5",
+    model="gpt-5.6-sol",
     api_key=None,
     base_url=None,
     max_turns=8,
@@ -281,7 +281,7 @@ Serialization:
 
 ```python
 Agent(
-    config=AgentConfig(model="gpt-5.5"),
+    config=AgentConfig(model="gpt-5.6-sol"),
     hosted_tools=[{"type": "web_search"}],
 )
 ```

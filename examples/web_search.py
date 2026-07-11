@@ -5,7 +5,7 @@ from simple_agent_base import Agent, AgentConfig
 
 async def main() -> None:
     async with Agent(
-        config=AgentConfig(model="gpt-5.5"),
+        config=AgentConfig(model="gpt-5.6-sol"),
         hosted_tools=[{"type": "web_search"}],
     ) as agent:
         result = await agent.run("What's the latest news about Python 3.13?")

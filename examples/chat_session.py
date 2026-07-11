@@ -4,7 +4,7 @@ from simple_agent_base import Agent, AgentConfig
 
 
 async def main() -> None:
-    async with Agent(config=AgentConfig(model="gpt-5.5")) as agent:
+    async with Agent(config=AgentConfig(model="gpt-5.6-sol")) as agent:
         chat = agent.chat()
 
         first = await chat.run("My name is Anson.")

@@ -54,7 +54,7 @@ $env:OPENAI_API_KEY="your_key_here"
 Optionally:
 
 ```bash
-$env:OPENAI_MODEL="gpt-5.5"
+$env:OPENAI_MODEL="gpt-5.6-sol"
 ```
 
 The repo includes [`.env.example`](../.env.example) as a template.

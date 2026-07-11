@@ -2,7 +2,7 @@ from simple_agent_base import Agent, AgentConfig
 
 
 def main() -> None:
-    with Agent(config=AgentConfig(model="gpt-5.5")) as agent:
+    with Agent(config=AgentConfig(model="gpt-5.6-sol")) as agent:
         for event in agent.stream_sync("Explain async IO in one short sentence."):
             if event.type == "text_delta" and event.delta:
                 print(event.delta, end="")

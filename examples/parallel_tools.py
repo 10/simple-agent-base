@@ -20,7 +20,7 @@ async def get_news(city: str) -> str:
 async def main() -> None:
     async with Agent(
         config=AgentConfig(
-            model="gpt-5.5",
+            model="gpt-5.6-sol",
             parallel_tool_calls=True,
         ),
         tools=[get_weather, get_news],
