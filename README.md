@@ -1,59 +1,20 @@
-# Simple Agent Base
+<div align="center">
 
-`simple-agent-base` is a small async-first Python package for building OpenAI Responses API agents.
+# simple-agent-base
 
-It gives you the pieces most small agent projects need: a request/tool loop, local Python tools, structured outputs, streaming events, chat history, image and file input, MCP tool bridging, and sync wrappers.
+*Async-first Python base for OpenAI agents, without the framework.*
 
-It is intentionally not a full agent framework. It does not include planning, retrieval, memory systems, workflow orchestration, or multi-agent primitives.
+[![Python](https://img.shields.io/badge/Python-3.12+-3776AB?style=flat&logo=python&logoColor=white)](https://python.org)
+[![PyPI](https://img.shields.io/badge/PyPI-simple--agent--base-006dad?style=flat&logo=pypi&logoColor=white)](https://pypi.org/project/simple-agent-base/)
+[![API](https://img.shields.io/badge/API-OpenAI%20Responses-412991?style=flat&logo=openai&logoColor=white)](https://platform.openai.com/docs/api-reference/responses)
+[![License](https://img.shields.io/badge/License-MIT-yellow?style=flat)](LICENSE)
 
-## Quick Start
+</div>
 
-Requirements:
-
-- Python `3.12+`
-- An OpenAI API key
-- `uv` or `pip`
-
-### 1. Install
-
-From PyPI:
-
-```bash
-python -m pip install simple-agent-base
-```
-
-With `uv`:
-
-```bash
-uv add simple-agent-base
-```
-
-From GitHub:
-
-```bash
-python -m pip install "git+https://github.com/10/simple-agent-base.git"
-```
-
-From a local checkout:
-
-```bash
-uv sync
-```
-
-### 2. Configure
-
-```bash
-export OPENAI_API_KEY="your-key"
-export OPENAI_MODEL="gpt-5.6-sol"
-```
-
-You can also pass `model` directly through `AgentConfig`.
-
-### 3. Run an agent
+---
 
 ```python
 import asyncio
-
 from simple_agent_base import Agent, AgentConfig, tool
 
 
@@ -76,22 +37,29 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-`Agent` supports `async with` (and `with` for sync code) so cleanup happens automatically. If you prefer explicit lifecycle management, `await agent.aclose()` and `agent.close()` still work.
+The request/tool loop, local tools, structured output, streaming, chat history,
+images and files, MCP bridging, and sync wrappers. No planning, retrieval,
+memory, orchestration, or multi-agent primitives.
 
-## Core API
+## Features
 
-Most projects use these exports:
+- **Tools are plain functions** — `@tool` on any async or sync function, with types read from the annotations.
+- **Streaming with real events** — text and reasoning deltas, tool call lifecycle, MCP approvals.
+- **Structured output** — hand it a Pydantic model, get `output_data` back.
+- **MCP over stdio or HTTP** — discovered tools appear to the model as normal functions.
+- **Async-first, sync when you need it** — `run_sync()` and `stream_sync()` for scripts.
 
-- `Agent`
-- `AgentConfig`
-- `ChatSession`
-- `ChatMessage`
-- `TextPart`, `ImagePart`, `FilePart`
-- `ToolRegistry`
-- `tool`
-- `MCPServer`
+## Install
 
-Common calls:
+```bash
+uv add simple-agent-base           # or: pip install simple-agent-base
+export OPENAI_API_KEY="your-key"
+export OPENAI_MODEL="gpt-5.6-sol"
+```
+
+Python 3.12+. From a checkout, `uv sync`.
+
+## Agent
 
 ```python
 result = await agent.run("Say hello.")
@@ -104,90 +72,55 @@ await chat.run("My name is Anson.")
 await chat.run("What is my name?")
 ```
 
-`AgentRunResult` includes:
+`Agent` supports `async with` (and `with` in sync code); `aclose()` and
+`close()` are there if you want to manage it yourself.
 
-- `output_text`
-- `output_data` for structured output
-- `tool_results`
-- `mcp_calls`
-- `reasoning_summary`
-- `response_id`
-- `usage`
-- `usage_by_response`
-- `raw_responses`
+Each run converts input to Responses API items, sends `system_prompt` as a
+`developer` message, then loops: if the model returns tool calls, local or MCP
+tools run and their outputs are appended. It repeats until a final response or
+`max_turns`.
 
-## How It Works
+`AgentRunResult` carries `output_text`, `output_data`, `tool_results`,
+`mcp_calls`, `reasoning_summary`, `response_id`, `usage`, `usage_by_response`,
+and `raw_responses`.
 
-1. `Agent.run(...)` or `Agent.stream(...)` receives a string or message list.
-2. The input is converted to Responses API items.
-3. A convenience `system_prompt` is sent as a `developer` message.
-4. The OpenAI provider sends the request.
-5. If the model returns tool calls, local or MCP tools run and their outputs are appended.
-6. The loop repeats until the model returns a final response or `max_turns` is reached.
+Main exports: `Agent`, `AgentConfig`, `ChatSession`, `ChatMessage`, `TextPart`,
+`ImagePart`, `FilePart`, `ToolRegistry`, `tool`, `MCPServer`.
 
 ## Tools
 
-Use `@tool` on async or sync Python functions:
-
 ```python
-from simple_agent_base import tool
-
-
 @tool
 def lookup_user(user_id: int) -> str:
     """Fetch a user record."""
     return '{"id": 1, "name": "Ada"}'
 ```
 
-Tool parameters must have type annotations. `*args` and `**kwargs` are rejected. The first docstring line becomes the tool description unless you override it:
+Parameters need type annotations. `*args` and `**kwargs` are rejected. The first
+docstring line becomes the description unless you pass
+`@tool(name=..., description=...)`.
 
-```python
-@tool(name="lookup_user", description="Fetch a user record.")
-def get_user(user_id: int) -> str:
-    return '{"id": 1, "name": "Ada"}'
-```
+Two `AgentConfig` knobs: `parallel_tool_calls=True` runs same-turn calls
+together — only for independent tools — and `tool_timeout=30.0` caps each call,
+raising `ToolExecutionError`. A sync tool's timeout stops the wait, but Python
+cannot kill the worker thread.
 
-Parallel same-turn tool execution is opt-in:
+### Hosted tools
 
-```python
-agent = Agent(
-    config=AgentConfig(model="gpt-5.6-sol", parallel_tool_calls=True),
-    tools=[get_weather, get_news],
-)
-```
-
-Only enable it for independent tools.
-
-Set `tool_timeout` when each local or MCP tool call should have a maximum runtime:
-
-```python
-agent = Agent(
-    config=AgentConfig(model="gpt-5.6-sol", tool_timeout=30.0),
-    tools=[lookup_user],
-)
-```
-
-Timeouts raise `ToolExecutionError`. For sync tools, the timeout stops waiting for the result, but Python cannot forcibly stop the worker thread.
-
-### Hosted Tools
-
-Some providers (notably OpenAI) execute tools server-side and return the result directly in the response. These do not have a Python implementation — you just declare them and the provider handles execution.
+Provider-side tools you declare but do not implement:
 
 ```python
 agent = Agent(
     config=AgentConfig(model="gpt-5.6-sol"),
     hosted_tools=[{"type": "web_search"}],
 )
-
-result = await agent.run("What's new in Python 3.13?")
-print(result.output_text)
 ```
 
-Hosted tool entries are passed through to the provider unchanged. Common types on the OpenAI Responses API include `web_search`, `file_search`, `code_interpreter`, `image_generation`, and `computer_use`.
-
-Support depends on the provider. Real OpenAI supports the full set; OpenAI-compatible proxies and self-hosted servers usually support a subset or none. If your provider rejects a tool type, the error surfaces from the provider, not from this library.
-
-Hosted tools do not appear in `result.tool_results`, but streaming can emit `hosted_tool_call_started`, `hosted_tool_call_updated`, and `hosted_tool_call_completed` events for supported provider-side calls.
+Entries pass through unchanged. OpenAI supports `web_search`, `file_search`,
+`code_interpreter`, `image_generation`, and `computer_use`; proxies and
+self-hosted servers usually support fewer, and rejections surface as provider
+errors. Hosted calls skip `result.tool_results` but do emit
+`hosted_tool_call_*` streaming events.
 
 ## Streaming
 
@@ -199,29 +132,18 @@ async for event in agent.stream("Explain async IO in one sentence."):
         print(event.result.output_text)
 ```
 
-Event types include:
-
-- `text_delta`
-- `reasoning_delta`
-- `tool_arguments_delta`
-- `hosted_tool_call_started`
-- `hosted_tool_call_updated`
-- `hosted_tool_call_completed`
-- `tool_call_started`
-- `tool_call_completed`
-- `mcp_approval_requested`
-- `mcp_call_started`
-- `mcp_call_completed`
-- `completed`
+```
+text_delta                 tool_call_started
+reasoning_delta            tool_call_completed
+tool_arguments_delta       mcp_approval_requested
+hosted_tool_call_started   mcp_call_started
+hosted_tool_call_updated   mcp_call_completed
+hosted_tool_call_completed completed
+```
 
 ## Structured Output
 
-Pass a Pydantic model as `response_model`:
-
 ```python
-from pydantic import BaseModel
-
-
 class Person(BaseModel):
     name: str
     age: int
@@ -231,71 +153,42 @@ result = await agent.run(
     "Extract the person from: Sarah is 29 years old.",
     response_model=Person,
 )
-
 print(result.output_data)
 ```
 
-Structured output works with normal runs, streaming, and tool calls.
+Works with normal runs, streaming, and tool calls.
 
 ## Chat Sessions
 
-`ChatSession` keeps in-memory history:
-
 ```python
 chat = agent.chat(system_prompt="You are concise.")
-
 await chat.run("My name is Anson.")
 result = await chat.run("What is my name?")
 
-print(result.output_text)
-print(chat.history)
-```
-
-Snapshots can be stored and restored:
-
-```python
 payload = chat.export()
 restored = agent.chat_from_snapshot(payload)
 ```
 
-Snapshots include conversation items and the chat-level `system_prompt`. They do not include model config, tools, or provider settings.
+History is in memory. Snapshots hold conversation items and the chat-level
+`system_prompt` — not model config, tools, or provider settings.
 
 ## Images and Files
 
-Use content parts when a message needs more than plain text:
-
 ```python
-from simple_agent_base import ChatMessage, ImagePart, TextPart
-
-
-result = await agent.run(
-    [
-        ChatMessage(
-            role="user",
-            content=[
-                TextPart("Describe this image."),
-                ImagePart.from_file("cat.png"),
-            ],
-        )
-    ]
-)
+result = await agent.run([
+    ChatMessage(role="user", content=[
+        TextPart("Describe this image."),
+        ImagePart.from_file("cat.png"),
+    ])
+])
 ```
 
-Use `FilePart.from_file(...)` for local documents or `from_url(...)` for hosted files. Local helpers convert files to Base64 data URLs; they do not use the OpenAI Files API.
+`FilePart.from_file(...)` for local documents, `from_url(...)` for hosted ones.
+Local helpers inline files as Base64 data URLs rather than using the Files API.
 
-## MCP Tools
-
-Client-side MCP servers can be exposed to the model as function tools:
+## MCP
 
 ```python
-import sys
-from pathlib import Path
-
-from simple_agent_base import Agent, AgentConfig, MCPServer
-
-
-server_path = Path("tests/fixtures/mcp_demo_server.py").resolve()
-
 agent = Agent(
     config=AgentConfig(model="gpt-5.6-sol"),
     mcp_servers=[
@@ -309,12 +202,9 @@ agent = Agent(
 )
 ```
 
-Discovered MCP tools are namespaced as `server__tool`. Use `allowed_tools` to expose only specific tools, and set `require_approval=True` with an `approval_handler` when calls need local confirmation.
-
-Supported transports:
-
-- `MCPServer.stdio(...)`
-- `MCPServer.http(...)`
+`MCPServer.stdio(...)` and `MCPServer.http(...)`. Discovered tools are
+namespaced `server__tool`. Narrow them with `allowed_tools`, or set
+`require_approval=True` with an `approval_handler` to confirm calls locally.
 
 ## Configuration
 
@@ -332,63 +222,54 @@ AgentConfig(
 )
 ```
 
-Environment variables:
+Read from the environment: `OPENAI_API_KEY`, `OPENAI_MODEL`, `OPENAI_BASE_URL`,
+`OPENAI_REASONING_EFFORT`.
 
-- `OPENAI_API_KEY`
-- `OPENAI_MODEL`
-- `OPENAI_BASE_URL`
-- `OPENAI_REASONING_EFFORT`
-
-## Sync Usage
-
-The package is async-first, but synchronous programs can use:
+For synchronous programs:
 
 ```python
 with Agent(config=AgentConfig(model="gpt-5.6-sol")) as agent:
-    result = agent.run_sync("Say hello.")
-    print(result.output_text)
+    print(agent.run_sync("Say hello.").output_text)
 ```
 
-`agent.close()` is also available if you'd rather manage the lifecycle yourself.
+Do not call `run_sync()` or `stream_sync()` from inside a running event loop.
 
-Do not call `run_sync()` or `stream_sync()` from inside an existing event loop.
+## Layout
 
-## Examples and Docs
+```
+simple-agent-base/
+├── src/simple_agent_base/
+│   ├── agent.py              # run/stream loop and turn handling
+│   ├── chat.py               # ChatSession and snapshots
+│   ├── config.py             # AgentConfig and environment
+│   ├── mcp.py                # MCPServer, stdio and http transports
+│   ├── tools/                # @tool decorator, registry, schemas
+│   ├── providers/            # provider interface and the OpenAI one
+│   ├── transcript.py         # Responses item conversion
+│   ├── types.py              # messages, parts, results, events
+│   └── sync_utils.py         # run_sync / stream_sync wrappers
+├── examples/                 # 18 runnable scripts
+├── skills/simple-agent-base/ # agent skill
+└── docs/                     # usage, tools, architecture
+```
 
-Start with:
+## Docs
 
-- [examples/basic_agent.py](examples/basic_agent.py)
-- [examples/structured_output.py](examples/structured_output.py)
-- [examples/streaming.py](examples/streaming.py)
-- [examples/chat_session.py](examples/chat_session.py)
-- [examples/mcp_server.py](examples/mcp_server.py)
+Start with [basic_agent.py](examples/basic_agent.py),
+[structured_output.py](examples/structured_output.py),
+[streaming.py](examples/streaming.py),
+[chat_session.py](examples/chat_session.py), and
+[mcp_server.py](examples/mcp_server.py).
 
-More details:
-
-- [docs/usage.md](docs/usage.md)
-- [docs/tools.md](docs/tools.md)
-- [docs/structured-output.md](docs/structured-output.md)
-- [docs/architecture.md](docs/architecture.md)
-- [docs/development.md](docs/development.md)
+Then [docs/usage.md](docs/usage.md), [docs/tools.md](docs/tools.md),
+[docs/structured-output.md](docs/structured-output.md),
+[docs/architecture.md](docs/architecture.md), and
+[docs/development.md](docs/development.md).
 
 ## Development
 
-Install development dependencies:
-
 ```bash
 uv sync --dev
+uv run pytest                             # no API key needed
+uv run python scripts/live_e2e_test.py    # needs one
 ```
-
-Run tests:
-
-```bash
-uv run pytest
-```
-
-Run the live provider check:
-
-```bash
-uv run python scripts/live_e2e_test.py
-```
-
-Unit tests do not require an API key. The live script does.
