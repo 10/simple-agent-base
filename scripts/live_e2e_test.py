@@ -98,7 +98,7 @@ def make_config(
     *,
     reasoning_effort: ReasoningEffort | None = None,
 ) -> AgentConfig:
-    return AgentConfig(temperature=0, timeout=120, max_turns=6, reasoning_effort=reasoning_effort)
+    return AgentConfig(timeout=120, max_turns=6, reasoning_effort=reasoning_effort)
 
 
 def make_demo_mcp_server(*, require_approval: bool) -> MCPServer:

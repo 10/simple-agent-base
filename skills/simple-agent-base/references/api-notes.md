@@ -58,7 +58,7 @@ If `provider` is omitted, `OpenAIResponsesProvider(config)` is used.
 
 ```python
 AgentConfig(
-    model="gpt-5.6-sol",
+    model="gpt-6-astra",
     api_key=None,
     base_url=None,
     max_turns=8,
@@ -78,6 +78,9 @@ Validation:
 - `timeout > 0`
 - `tool_timeout > 0`
 - `reasoning_effort`: `"none"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`
+
+For the Astra examples, leave `temperature=None` and set
+`reasoning_effort="low"` for lighter reasoning.
 
 Environment aliases:
 
@@ -281,7 +284,7 @@ Serialization:
 
 ```python
 Agent(
-    config=AgentConfig(model="gpt-5.6-sol"),
+    config=AgentConfig(model="gpt-6-astra"),
     hosted_tools=[{"type": "web_search"}],
 )
 ```

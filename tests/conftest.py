@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
@@ -7,7 +8,34 @@ from pydantic import BaseModel
 
 from simple_agent_base.errors import ProviderError
 from simple_agent_base.providers.base import ProviderEvent, ProviderResponse
+from simple_agent_base.tools import tool
 from simple_agent_base.types import ConversationItem
+
+
+@tool
+async def ping(message: str) -> str:
+    """Echo a message back."""
+    return f"pong: {message}"
+
+
+@tool
+async def slow_ping(message: str) -> str:
+    """Echo a message back after a short delay."""
+    await asyncio.sleep(0.05)
+    return f"pong: {message}"
+
+
+@tool
+async def very_slow_ping(message: str) -> str:
+    """Echo a message back after a longer delay."""
+    await asyncio.sleep(0.2)
+    return f"pong: {message}"
+
+
+@tool
+async def explode(message: str) -> str:
+    """Always fail."""
+    raise ValueError(message)
 
 
 class FakeProvider:

@@ -26,7 +26,7 @@ async def ping(message: str) -> str:
 
 async def main() -> None:
     async with Agent(
-        config=AgentConfig(model="gpt-5.6-sol"),
+        config=AgentConfig(model="gpt-6-astra"),
         tools=[ping],
         system_prompt="You are concise.",
     ) as agent:
@@ -54,7 +54,7 @@ memory, orchestration, or multi-agent primitives.
 ```bash
 uv add simple-agent-base           # or: pip install simple-agent-base
 export OPENAI_API_KEY="your-key"
-export OPENAI_MODEL="gpt-5.6-sol"
+export OPENAI_MODEL="gpt-6-astra"
 ```
 
 Python 3.12+. From a checkout, `uv sync`.
@@ -111,7 +111,7 @@ Provider-side tools you declare but do not implement:
 
 ```python
 agent = Agent(
-    config=AgentConfig(model="gpt-5.6-sol"),
+    config=AgentConfig(model="gpt-6-astra"),
     hosted_tools=[{"type": "web_search"}],
 )
 ```
@@ -190,7 +190,7 @@ Local helpers inline files as Base64 data URLs rather than using the Files API.
 
 ```python
 agent = Agent(
-    config=AgentConfig(model="gpt-5.6-sol"),
+    config=AgentConfig(model="gpt-6-astra"),
     mcp_servers=[
         MCPServer.stdio(
             name="demo",
@@ -210,7 +210,7 @@ namespaced `server__tool`. Narrow them with `allowed_tools`, or set
 
 ```python
 AgentConfig(
-    model="gpt-5.6-sol",
+    model="gpt-6-astra",
     api_key=None,
     base_url=None,
     max_turns=8,
@@ -225,10 +225,13 @@ AgentConfig(
 Read from the environment: `OPENAI_API_KEY`, `OPENAI_MODEL`, `OPENAI_BASE_URL`,
 `OPENAI_REASONING_EFFORT`.
 
+The examples use GPT-6 Astra. Leave `temperature=None` and set
+`reasoning_effort="low"` for lighter reasoning.
+
 For synchronous programs:
 
 ```python
-with Agent(config=AgentConfig(model="gpt-5.6-sol")) as agent:
+with Agent(config=AgentConfig(model="gpt-6-astra")) as agent:
     print(agent.run_sync("Say hello.").output_text)
 ```
 

@@ -16,7 +16,12 @@ All examples assume:
 Most examples assume `OPENAI_API_KEY` is set. `custom_provider.py` uses a local
 static provider and does not require an API key.
 
-`OPENAI_MODEL` is optional if you want `AgentConfig()` to pick the model from the environment.
+The OpenAI examples use `gpt-6-astra`. The MCP examples also accept an
+`OPENAI_MODEL` override; `AgentConfig()` without an explicit model requires it.
+
+For Astra, leave `temperature` unset. Use `reasoning_effort="low"` for lighter
+reasoning; the reasoning and streaming examples retain `"high"`. See the
+[Astra model guide](https://developers.openai.com/api/docs/guides/latest-model).
 
 ## Start Here
 

@@ -1,14 +1,13 @@
 from __future__ import annotations
 
-import asyncio
 from collections.abc import AsyncIterator
 from typing import Any
 
 import pytest
 from pydantic import BaseModel
 
-from conftest import FakeProvider
-from simple_agent_base import Agent, AgentConfig, ChatMessage, ChatSnapshot, UsageMetadata, tool
+from conftest import FakeProvider, explode, ping, slow_ping, very_slow_ping
+from simple_agent_base import Agent, AgentConfig, ChatMessage, ChatSnapshot, UsageMetadata
 from simple_agent_base.errors import ToolExecutionError
 from simple_agent_base.providers.base import (
     ProviderCompletedEvent,
@@ -27,32 +26,6 @@ class ExplodingStreamingProvider(FakeProvider):
         yield
 
 
-@tool
-async def ping(message: str) -> str:
-    """Echo a message back."""
-    return f"pong: {message}"
-
-
-@tool
-async def slow_ping(message: str) -> str:
-    """Echo a message back after a short delay."""
-    await asyncio.sleep(0.05)
-    return f"pong: {message}"
-
-
-@tool
-async def very_slow_ping(message: str) -> str:
-    """Echo a message back after a longer delay."""
-    await asyncio.sleep(0.2)
-    return f"pong: {message}"
-
-
-@tool
-async def explode(message: str) -> str:
-    """Always fail."""
-    raise ValueError(message)
-
-
 class Summary(BaseModel):
     title: str
     bullets: list[str]
@@ -62,13 +35,13 @@ REASONING_PROMPT = "Think carefully, then answer with exactly reasoning-ok."
 REASONING_SUMMARY = "Checking the exact-output constraint."
 
 
-def make_reasoning_stream(provider_summary: str = REASONING_SUMMARY) -> list[ProviderEvent]:
+def make_reasoning_stream() -> list[ProviderEvent]:
     return [
-        ProviderReasoningDeltaEvent(delta=provider_summary),
+        ProviderReasoningDeltaEvent(delta=REASONING_SUMMARY),
         ProviderCompletedEvent(
             response=ProviderResponse(
                 output_text="reasoning-ok",
-                reasoning_summary=provider_summary,
+                reasoning_summary=REASONING_SUMMARY,
             )
         ),
     ]
@@ -97,13 +70,16 @@ async def test_stream_yields_text_delta_events() -> None:
 
 
 @pytest.mark.asyncio
-async def test_stream_yields_reasoning_delta_events() -> None:
+async def test_stream_yields_reasoning_delta_and_completed_summary() -> None:
     provider = FakeProvider(stream_sequences=[make_reasoning_stream()])
     agent = Agent(config=AgentConfig(model="gpt-5"), provider=provider)
 
     events = [event async for event in agent.stream(REASONING_PROMPT)]
 
     assert [event.delta for event in events if event.type == "reasoning_delta"] == [REASONING_SUMMARY]
+    assert events[-1].type == "completed"
+    assert events[-1].result is not None
+    assert events[-1].result.reasoning_summary == REASONING_SUMMARY
 
 
 def test_stream_sync_yields_text_delta_and_completed_events() -> None:
@@ -177,18 +153,6 @@ async def test_stream_prepends_run_level_system_prompt() -> None:
             "content": "Say hello.",
         },
     ]
-
-
-@pytest.mark.asyncio
-async def test_stream_completed_result_includes_reasoning_summary() -> None:
-    provider = FakeProvider(stream_sequences=[make_reasoning_stream()])
-    agent = Agent(config=AgentConfig(model="gpt-5"), provider=provider)
-
-    events = [event async for event in agent.stream(REASONING_PROMPT)]
-
-    assert events[-1].type == "completed"
-    assert events[-1].result is not None
-    assert events[-1].result.reasoning_summary == REASONING_SUMMARY
 
 
 @pytest.mark.asyncio
@@ -591,31 +555,15 @@ def test_stream_sync_tool_timeout_raises() -> None:
 
 
 def test_stream_sync_after_run_sync_reuses_the_same_agent_cleanly() -> None:
-    class CombinedProvider:
-        def __init__(self) -> None:
-            self.create_calls: list[dict[str, Any]] = []
-
-        async def create_response(self, **kwargs: Any) -> ProviderResponse:
-            self.create_calls.append(kwargs)
-            return ProviderResponse(
-                output_text="hello world",
-            )
-
-        async def stream_response(
-            self, **kwargs: Any
-        ) -> AsyncIterator[ProviderEvent]:
-            yield ProviderTextDeltaEvent(delta="Hel")
-            yield ProviderTextDeltaEvent(delta="lo")
-            yield ProviderCompletedEvent(
-                response=ProviderResponse(
-                    output_text="Hello",
-                )
-            )
-
-        async def close(self) -> None:
-            return None
-
-    agent = Agent(config=AgentConfig(model="gpt-5"), provider=CombinedProvider())
+    provider = FakeProvider(
+        responses=[ProviderResponse(output_text="hello world")],
+        stream_sequences=[[
+            ProviderTextDeltaEvent(delta="Hel"),
+            ProviderTextDeltaEvent(delta="lo"),
+            ProviderCompletedEvent(response=ProviderResponse(output_text="Hello")),
+        ]],
+    )
+    agent = Agent(config=AgentConfig(model="gpt-5"), provider=provider)
 
     result = agent.run_sync("Say hello.")
     events = list(agent.stream_sync("Say hello again."))

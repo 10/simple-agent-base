@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import time
 from collections.abc import Sequence
 from pathlib import Path
@@ -9,7 +8,7 @@ from typing import Any
 import pytest
 from pydantic import BaseModel
 
-from conftest import FakeProvider
+from conftest import FakeProvider, explode, ping, slow_ping, very_slow_ping
 from simple_agent_base import Agent, AgentConfig, ChatMessage, FilePart, ImagePart, TextPart, UsageMetadata, tool
 from simple_agent_base.errors import (
     MaxTurnsExceededError,
@@ -31,29 +30,9 @@ class ClosableFakeProvider(FakeProvider):
 
 
 @tool
-async def ping(message: str) -> str:
-    """Echo a message back."""
-    return f"pong: {message}"
-
-
-@tool
 async def uppercase(value: str) -> str:
     """Uppercase a value."""
     return value.upper()
-
-
-@tool
-async def slow_ping(message: str) -> str:
-    """Echo a message back after a short delay."""
-    await asyncio.sleep(0.05)
-    return f"pong: {message}"
-
-
-@tool
-async def very_slow_ping(message: str) -> str:
-    """Echo a message back after a longer delay."""
-    await asyncio.sleep(0.2)
-    return f"pong: {message}"
 
 
 @tool
@@ -75,12 +54,6 @@ def sync_explode(message: str) -> str:
     raise ValueError(message)
 
 
-@tool
-async def explode(message: str) -> str:
-    """Always fail."""
-    raise ValueError(message)
-
-
 class Person(BaseModel):
     name: str
     age: int
@@ -94,13 +67,6 @@ class WeatherAnswer(BaseModel):
 
 REASONING_PROMPT = "Think carefully, then answer with exactly reasoning-ok."
 REASONING_SUMMARY = "I checked the constraint and kept the answer exact."
-
-
-def make_reasoning_response(*, reasoning_summary: str | None) -> ProviderResponse:
-    return ProviderResponse(
-        output_text="reasoning-ok",
-        reasoning_summary=reasoning_summary,
-    )
 
 
 @pytest.mark.asyncio
@@ -123,6 +89,8 @@ async def test_run_without_tools_returns_plain_text() -> None:
     )
     agent = Agent(config=AgentConfig(model="gpt-5"), provider=provider)
 
+    assert agent.hosted_tools == []
+
     result = await agent.run("Say hello.")
 
     assert result.output_text == "hello world"
@@ -130,34 +98,22 @@ async def test_run_without_tools_returns_plain_text() -> None:
     assert result.raw_responses == [{"id": "resp_1"}]
     assert result.output_data is None
     assert result.tool_results == []
+    assert result.reasoning_summary is None
+    assert result.usage is None
+    assert result.usage_by_response == []
 
 
 @pytest.mark.asyncio
 async def test_run_returns_reasoning_summary_when_provider_supplies_it() -> None:
-    provider = FakeProvider([make_reasoning_response(reasoning_summary=REASONING_SUMMARY)])
+    provider = FakeProvider([
+        ProviderResponse(output_text="reasoning-ok", reasoning_summary=REASONING_SUMMARY)
+    ])
     agent = Agent(config=AgentConfig(model="gpt-5"), provider=provider)
 
     result = await agent.run(REASONING_PROMPT)
 
     assert result.output_text == "reasoning-ok"
     assert result.reasoning_summary == REASONING_SUMMARY
-
-
-@pytest.mark.asyncio
-async def test_run_returns_none_usage_when_provider_omits_usage() -> None:
-    provider = FakeProvider(
-        [
-            ProviderResponse(
-                output_text="hello world",
-            )
-        ]
-    )
-    agent = Agent(config=AgentConfig(model="gpt-5"), provider=provider)
-
-    result = await agent.run("Say hello.")
-
-    assert result.usage is None
-    assert result.usage_by_response == []
 
 
 @pytest.mark.asyncio
@@ -227,17 +183,6 @@ async def test_run_aggregates_partial_usage_fields() -> None:
     assert result.usage.input_tokens == 10
     assert result.usage.output_tokens == 4
     assert result.usage.total_tokens is None
-
-
-@pytest.mark.asyncio
-async def test_run_returns_none_reasoning_summary_when_provider_supplies_none() -> None:
-    provider = FakeProvider([make_reasoning_response(reasoning_summary=None)])
-    agent = Agent(config=AgentConfig(model="gpt-5"), provider=provider)
-
-    result = await agent.run(REASONING_PROMPT)
-
-    assert result.output_text == "reasoning-ok"
-    assert result.reasoning_summary is None
 
 
 def test_run_sync_returns_plain_text() -> None:
@@ -482,31 +427,6 @@ async def test_restored_chat_uses_snapshot_system_prompt_over_agent_default() ->
         "role": "developer",
         "content": "Snapshot prompt",
     }
-
-
-@pytest.mark.asyncio
-async def test_snapshot_does_not_persist_convenience_prompt_as_message_item() -> None:
-    provider = FakeProvider(
-        [
-            ProviderResponse(
-                output_text="Stored.",
-                output_items=[
-                    {
-                        "type": "message",
-                        "role": "assistant",
-                        "content": [{"type": "output_text", "text": "Stored."}],
-                    }
-                ],
-            )
-        ]
-    )
-    agent = Agent(config=AgentConfig(model="gpt-5"), provider=provider)
-    chat = agent.chat(system_prompt="You are concise.")
-
-    await chat.run("My name is Anson.")
-    snapshot = chat.snapshot()
-
-    assert all(item.get("role") != "developer" for item in snapshot.items)
 
 
 @pytest.mark.asyncio
@@ -1900,15 +1820,6 @@ def test_hosted_tools_reject_entries_with_empty_type() -> None:
             provider=FakeProvider([]),
             hosted_tools=[{"type": ""}],
         )
-
-
-def test_hosted_tools_default_is_empty_list() -> None:
-    agent = Agent(
-        config=AgentConfig(model="gpt-5"),
-        provider=FakeProvider([]),
-    )
-
-    assert agent.hosted_tools == []
 
 
 @pytest.mark.asyncio

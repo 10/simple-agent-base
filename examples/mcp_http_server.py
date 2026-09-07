@@ -69,7 +69,7 @@ def demo_http_server() -> Iterator[str]:
 async def basic_http_mcp_run() -> None:
     with demo_http_server() as server_url:
         async with Agent(
-            config=AgentConfig(model=os.environ.get("OPENAI_MODEL", "gpt-5")),
+            config=AgentConfig(model=os.environ.get("OPENAI_MODEL", "gpt-6-astra")),
             mcp_servers=[MCPServer.http(name="demohttp", url=server_url)],
         ) as agent:
             result = await agent.run(
@@ -95,7 +95,7 @@ async def http_mcp_run_with_approvals() -> None:
 
     with demo_http_server() as server_url:
         async with Agent(
-            config=AgentConfig(model=os.environ.get("OPENAI_MODEL", "gpt-5")),
+            config=AgentConfig(model=os.environ.get("OPENAI_MODEL", "gpt-6-astra")),
             mcp_servers=[MCPServer.http(name="demohttp", url=server_url, require_approval=True)],
             approval_handler=approve,
         ) as agent:

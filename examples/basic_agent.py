@@ -11,7 +11,7 @@ async def ping(message: str) -> str:
 
 async def main() -> None:
     async with Agent(
-        config=AgentConfig(model="gpt-5.6-sol"),
+        config=AgentConfig(model="gpt-6-astra"),
         tools=[ping],
     ) as agent:
         result = await agent.run("Call ping with hello and tell me the result.")

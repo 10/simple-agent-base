@@ -69,10 +69,8 @@ class FakeStream:
         return self._final_response
 
 
-def fake_client(stream: FakeStream | None = None) -> SimpleNamespace:
+def fake_client(stream: FakeStream) -> SimpleNamespace:
     def stream_response(**_: Any) -> FakeStream:
-        if stream is None:
-            raise AssertionError("No fake stream configured.")
         return stream
 
     async def close() -> None:
@@ -94,16 +92,6 @@ def make_provider(*, reasoning_effort: ReasoningEffort | None = None) -> OpenAIR
             api_key="test-key",
             reasoning_effort=reasoning_effort,
         )
-    )
-
-
-def make_reasoning_response(*, summary_text: str = REASONING_SUMMARY) -> FakeResponse:
-    return FakeResponse(
-        output_text="reasoning-ok",
-        output=[
-            FakeReasoningItem(summary=[FakeSummaryPart(text=summary_text)]),
-            FakeOutputTextItem(content=[{"type": "output_text", "text": "reasoning-ok"}]),
-        ],
     )
 
 
@@ -139,7 +127,7 @@ def test_convert_response_extracts_reasoning_summary_from_reasoning_item() -> No
     assert converted.reasoning_summary == "First part.Second part."
 
 
-def test_convert_response_returns_none_when_no_reasoning_item_exists() -> None:
+def test_convert_response_allows_missing_reasoning_and_usage() -> None:
     provider = make_provider()
     response = FakeResponse(
         output_text="reasoning-ok",
@@ -149,6 +137,7 @@ def test_convert_response_returns_none_when_no_reasoning_item_exists() -> None:
     converted = provider._convert_response(response)
 
     assert converted.reasoning_summary is None
+    assert converted.usage is None
 
 
 def test_convert_response_extracts_usage_metadata() -> None:
@@ -182,18 +171,6 @@ def test_convert_response_extracts_usage_metadata() -> None:
     }
 
 
-def test_convert_response_allows_missing_usage() -> None:
-    provider = make_provider()
-    response = FakeResponse(
-        output_text="hello",
-        output=[FakeOutputTextItem(content=[{"type": "output_text", "text": "hello"}])],
-    )
-
-    converted = provider._convert_response(response)
-
-    assert converted.usage is None
-
-
 def test_convert_response_tolerates_partial_or_provider_specific_usage() -> None:
     provider = make_provider()
     response = FakeResponseWithUsage(
@@ -218,7 +195,13 @@ def test_convert_response_tolerates_partial_or_provider_specific_usage() -> None
 @pytest.mark.asyncio
 async def test_stream_response_emits_reasoning_delta_and_completed_summary() -> None:
     provider = make_provider(reasoning_effort="high")
-    final_response = make_reasoning_response()
+    final_response = FakeResponse(
+        output_text="reasoning-ok",
+        output=[
+            FakeReasoningItem(summary=[FakeSummaryPart(text=REASONING_SUMMARY)]),
+            FakeOutputTextItem(content=[{"type": "output_text", "text": "reasoning-ok"}]),
+        ],
+    )
     provider._client = fake_client(
         stream=FakeStream(
             events=[
@@ -373,7 +356,16 @@ async def test_stream_response_emits_web_search_call_events() -> None:
 
 
 @pytest.mark.asyncio
-async def test_stream_response_emits_generic_hosted_tool_events_for_file_search() -> None:
+@pytest.mark.parametrize(
+    ("tool_type", "item_id", "intermediate_status"),
+    [
+        ("file_search_call", "fs_1", "searching"),
+        ("code_interpreter_call", "ci_1", "interpreting"),
+    ],
+)
+async def test_stream_response_emits_generic_hosted_tool_events(
+    tool_type: str, item_id: str, intermediate_status: str,
+) -> None:
     provider = make_provider()
     final_response = FakeResponse(
         output=[
@@ -388,14 +380,14 @@ async def test_stream_response_emits_generic_hosted_tool_events_for_file_search(
                     output_index=0,
                     sequence_number=1,
                     item=SimpleNamespace(
-                        id="fs_1",
-                        type="file_search_call",
+                        id=item_id,
+                        type=tool_type,
                         status="in_progress",
                     ),
                 ),
                 SimpleNamespace(
-                    type="response.file_search_call.searching",
-                    item_id="fs_1",
+                    type=f"response.{tool_type}.{intermediate_status}",
+                    item_id=item_id,
                     output_index=0,
                     sequence_number=2,
                 ),
@@ -404,8 +396,8 @@ async def test_stream_response_emits_generic_hosted_tool_events_for_file_search(
                     output_index=0,
                     sequence_number=3,
                     item=SimpleNamespace(
-                        id="fs_1",
-                        type="file_search_call",
+                        id=item_id,
+                        type=tool_type,
                         status="completed",
                     ),
                 ),
@@ -422,98 +414,21 @@ async def test_stream_response_emits_generic_hosted_tool_events_for_file_search(
         "hosted_tool_call_updated",
         "hosted_tool_call_completed",
     ]
-    assert [event.tool_type for event in hosted_events] == [
-        "file_search_call",
-        "file_search_call",
-        "file_search_call",
-    ]
+    assert [event.tool_type for event in hosted_events] == [tool_type] * 3
     assert [event.status for event in hosted_events] == [
         "in_progress",
-        "searching",
+        intermediate_status,
         "completed",
     ]
     assert hosted_events[0].item == {
-        "id": "fs_1",
-        "type": "file_search_call",
+        "id": item_id,
+        "type": tool_type,
         "status": "in_progress",
     }
     assert hosted_events[1].item is None
     assert hosted_events[2].item == {
-        "id": "fs_1",
-        "type": "file_search_call",
-        "status": "completed",
-    }
-
-
-@pytest.mark.asyncio
-async def test_stream_response_emits_generic_hosted_tool_events_for_code_interpreter() -> None:
-    provider = make_provider()
-    final_response = FakeResponse(
-        output=[
-            FakeOutputTextItem(content=[{"type": "output_text", "text": "done"}]),
-        ],
-    )
-    provider._client = fake_client(
-        stream=FakeStream(
-            events=[
-                SimpleNamespace(
-                    type="response.output_item.added",
-                    output_index=0,
-                    sequence_number=1,
-                    item=SimpleNamespace(
-                        id="ci_1",
-                        type="code_interpreter_call",
-                        status="in_progress",
-                    ),
-                ),
-                SimpleNamespace(
-                    type="response.code_interpreter_call.interpreting",
-                    item_id="ci_1",
-                    output_index=0,
-                    sequence_number=2,
-                ),
-                SimpleNamespace(
-                    type="response.output_item.done",
-                    output_index=0,
-                    sequence_number=3,
-                    item=SimpleNamespace(
-                        id="ci_1",
-                        type="code_interpreter_call",
-                        status="completed",
-                    ),
-                ),
-            ],
-            final_response=final_response,
-        )
-    )
-
-    events = [event async for event in provider.stream_response(input_items=[], tools=[])]
-    hosted_events = [event for event in events if event.type != "completed"]
-
-    assert [event.type for event in hosted_events] == [
-        "hosted_tool_call_started",
-        "hosted_tool_call_updated",
-        "hosted_tool_call_completed",
-    ]
-    assert [event.tool_type for event in hosted_events] == [
-        "code_interpreter_call",
-        "code_interpreter_call",
-        "code_interpreter_call",
-    ]
-    assert [event.status for event in hosted_events] == [
-        "in_progress",
-        "interpreting",
-        "completed",
-    ]
-    assert hosted_events[0].item == {
-        "id": "ci_1",
-        "type": "code_interpreter_call",
-        "status": "in_progress",
-    }
-    assert hosted_events[1].item is None
-    assert hosted_events[2].item == {
-        "id": "ci_1",
-        "type": "code_interpreter_call",
+        "id": item_id,
+        "type": tool_type,
         "status": "completed",
     }
 

@@ -119,14 +119,10 @@ def message_content_from_item(
     if not isinstance(content_value, list):
         return None
 
-    return _content_from_blocks(content_value)
-
-
-def _content_from_blocks(blocks: list[object]) -> str | list[TextPart | ImagePart | FilePart] | None:
     content_parts: list[TextPart | ImagePart | FilePart] = []
     saw_rich_content = False
 
-    for block in blocks:
+    for block in content_value:
         if not isinstance(block, dict):
             continue
 

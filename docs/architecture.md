@@ -101,7 +101,7 @@ That loop exists in two forms:
 
 ## Transcript Model
 
-The provider layer uses `ConversationItem = dict[str, Any]`.
+The provider layer uses `ConversationItem = dict[str, object]`.
 
 The package does not expose a full typed transcript object graph for provider items. Instead, it keeps the internal transcript as normalized dicts that match Responses-style items closely.
 
@@ -160,7 +160,6 @@ Convenience system prompts are not a separate provider feature. The package impl
 Relevant methods:
 
 - `transcript.clean_system_prompt(...)`
-- `Agent._resolve_system_prompt(...)`
 - `transcript.build_transcript(...)`
 - `transcript.persist_chat_items(...)`
 
@@ -294,12 +293,7 @@ The tool system has three layers:
 
 ### Decorator
 
-`@tool` stores tool metadata and a prebuilt definition on the function object.
-
-Relevant attributes:
-
-- `__simple_agent_base_tool_metadata__`
-- `__simple_agent_base_tool_definition__`
+`@tool` stores a prebuilt definition on the function object as `__simple_agent_base_tool_definition__`.
 
 ### Registry
 
@@ -357,7 +351,7 @@ That means:
 For `ChatSession.stream(...)`:
 
 - the session updates its stored items only after a `completed` event
-- if the streamed turn ends in `error`, the incomplete turn is not stored as a completed state update
+- if the streamed turn raises an exception, the incomplete turn is not stored as a completed state update
 
 ## Sync Runtime
 

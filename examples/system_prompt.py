@@ -5,7 +5,7 @@ from simple_agent_base import Agent, AgentConfig
 
 async def main() -> None:
     async with Agent(
-        config=AgentConfig(model="gpt-5.6-sol"),
+        config=AgentConfig(model="gpt-6-astra"),
         system_prompt="You are concise and helpful.",
     ) as agent:
         default_result = await agent.run("Say hello in five words or fewer.")

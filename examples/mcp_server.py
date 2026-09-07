@@ -31,7 +31,7 @@ def build_demo_server(*, require_approval: bool) -> MCPServer:
 
 async def basic_mcp_run() -> None:
     async with Agent(
-        config=AgentConfig(model=os.environ.get("OPENAI_MODEL", "gpt-5")),
+        config=AgentConfig(model=os.environ.get("OPENAI_MODEL", "gpt-6-astra")),
         mcp_servers=[build_demo_server(require_approval=False)],
     ) as agent:
         result = await agent.run(
@@ -53,7 +53,7 @@ async def mcp_run_with_approvals() -> None:
         return True
 
     async with Agent(
-        config=AgentConfig(model=os.environ.get("OPENAI_MODEL", "gpt-5")),
+        config=AgentConfig(model=os.environ.get("OPENAI_MODEL", "gpt-6-astra")),
         mcp_servers=[build_demo_server(require_approval=True)],
         approval_handler=approve,
     ) as agent:

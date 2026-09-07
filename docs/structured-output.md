@@ -112,7 +112,7 @@ async def get_weather(city: str) -> str:
 
 
 agent = Agent(
-    config=AgentConfig(model="gpt-5.6-sol"),
+    config=AgentConfig(model="gpt-6-astra"),
     tools=[get_weather],
 )
 

@@ -12,7 +12,7 @@ class Person(BaseModel):
 
 
 async def main() -> None:
-    async with Agent(config=AgentConfig(model="gpt-5.6-sol")) as agent:
+    async with Agent(config=AgentConfig(model="gpt-6-astra")) as agent:
         result = await agent.run(
             "Extract a person from this sentence: Sarah is 29 years old and lives in Seattle.",
             response_model=Person,

@@ -37,7 +37,7 @@ Typical construction:
 from simple_agent_base import Agent, AgentConfig
 
 agent = Agent(
-    config=AgentConfig(model="gpt-5.6-sol"),
+    config=AgentConfig(model="gpt-6-astra"),
     tools=[...],
     system_prompt="...",
 )
@@ -405,7 +405,7 @@ You can enable reasoning through `AgentConfig.reasoning_effort`.
 ```python
 agent = Agent(
     config=AgentConfig(
-        model="gpt-5.6-sol",
+        model="gpt-6-astra",
         reasoning_effort="high",
     )
 )
@@ -429,7 +429,7 @@ Agent-level default:
 
 ```python
 agent = Agent(
-    config=AgentConfig(model="gpt-5.6-sol"),
+    config=AgentConfig(model="gpt-6-astra"),
     system_prompt="You are concise and helpful.",
 )
 ```
@@ -557,7 +557,7 @@ restored = agent.chat_from_snapshot(payload)
 For streamed chat sessions:
 
 - the chat state updates only after a successful `completed` event
-- if a streamed turn fails and ends with `error`, the incomplete turn is not persisted as completed chat state
+- if a streamed turn raises an exception, the incomplete turn is not persisted as completed chat state
 
 ## Sync Wrappers
 
@@ -566,7 +566,7 @@ The package is async-first, but it also supports synchronous programs.
 ### `run_sync(...)`
 
 ```python
-agent = Agent(config=AgentConfig(model="gpt-5.6-sol"))
+agent = Agent(config=AgentConfig(model="gpt-6-astra"))
 
 try:
     result = agent.run_sync("Say hello.")
@@ -626,7 +626,7 @@ The built-in provider owns an `AsyncOpenAI` client, so explicit cleanup is the n
 
 ```python
 AgentConfig(
-    model="gpt-5.6-sol",
+    model="gpt-6-astra",
     api_key=None,
     base_url=None,
     max_turns=8,

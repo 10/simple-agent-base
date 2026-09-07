@@ -22,7 +22,7 @@ async def get_weather(city: str) -> str:
 
 async def main() -> None:
     async with Agent(
-        config=AgentConfig(model="gpt-5.6-sol", tool_timeout=30.0),
+        config=AgentConfig(model="gpt-6-astra", tool_timeout=30.0),
         tools=[get_weather],
         system_prompt="Answer briefly and use tools when current data is needed.",
     ) as agent:
@@ -55,7 +55,7 @@ async def get_weather(city: str) -> str:
 
 
 async with Agent(
-    config=AgentConfig(model="gpt-5.6-sol"),
+    config=AgentConfig(model="gpt-6-astra"),
     tools=[get_weather],
 ) as agent:
     result = await agent.run(
@@ -96,7 +96,7 @@ Wrap the consuming loop in `try/except` if you need to display provider or tool 
 ## Chat Session With Snapshot Persistence
 
 ```python
-async with Agent(config=AgentConfig(model="gpt-5.6-sol")) as agent:
+async with Agent(config=AgentConfig(model="gpt-6-astra")) as agent:
     chat = agent.chat(system_prompt="You are concise.")
 
     await chat.run("My name is Taylor.")
@@ -137,7 +137,7 @@ Use `from_url(...)` for hosted image or file URLs. Local `from_file(...)` helper
 
 ```python
 async with Agent(
-    config=AgentConfig(model="gpt-5.6-sol"),
+    config=AgentConfig(model="gpt-6-astra"),
     hosted_tools=[{"type": "web_search"}],
 ) as agent:
     result = await agent.run("Find recent Python 3.13 release highlights.")
@@ -165,7 +165,7 @@ def approve(request: MCPApprovalRequest) -> bool:
 server_path = Path("tests/fixtures/mcp_demo_server.py").resolve()
 
 async with Agent(
-    config=AgentConfig(model="gpt-5.6-sol", tool_timeout=15.0),
+    config=AgentConfig(model="gpt-6-astra", tool_timeout=15.0),
     mcp_servers=[
         MCPServer.stdio(
             name="demo",
@@ -192,7 +192,7 @@ from simple_agent_base import Agent, AgentConfig, MCPServer
 
 
 async with Agent(
-    config=AgentConfig(model="gpt-5.6-sol"),
+    config=AgentConfig(model="gpt-6-astra"),
     mcp_servers=[
         MCPServer.http(
             name="docs",
@@ -221,7 +221,7 @@ def slugify(title: str) -> str:
 
 
 with Agent(
-    config=AgentConfig(model="gpt-5.6-sol"),
+    config=AgentConfig(model="gpt-6-astra"),
     tools=[slugify],
 ) as agent:
     result = agent.run_sync("Slugify 'Simple Agent Base'.")

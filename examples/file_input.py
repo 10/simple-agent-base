@@ -4,7 +4,7 @@ from simple_agent_base import Agent, AgentConfig, ChatMessage, FilePart, TextPar
 
 
 async def main() -> None:
-    async with Agent(config=AgentConfig(model="gpt-5.6-sol")) as agent:
+    async with Agent(config=AgentConfig(model="gpt-6-astra")) as agent:
         result = await agent.run(
             [
                 ChatMessage(
